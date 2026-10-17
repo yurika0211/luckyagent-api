@@ -20,6 +20,8 @@ The root package is named `transport` and provides:
   and collaboration controllers, using injected public tool-runtime ports.
 - `health`: health check registration and reports.
 - `grpc`: protobuf messages, client, service contract and gateway registration.
+- `workflow`: optional Gin handlers over the public tool-module DAG engine;
+  the DAG implementation does not depend on Gin or the API module.
 
 It never imports the LuckyAgent runtime. The `luckyagent-gateway/turn` package
 supplies shared neutral event/usage DTOs; importing it does not compile every
@@ -64,6 +66,18 @@ resource cleanup and graceful shutdown.
 
 ## Compatibility and tests
 
+`workflow.NewServerHandlers` accepts a `luckyagent-tools/workflow.WorkflowEngine`
+whose executor is configured by the host. `RegisterRoutes` preserves the
+`/workflows` and `/workflow-instances` paths, methods and JSON fields. The root
+transport package does not import Gin. The host retains action registration,
+authentication, listening and shutdown ownership.
+
+This adapter uses execution packages introduced after tools v0.2.2. For
+joint changes, merge tools first and pin its merged commit (a Go pseudo-version)
+or a release containing the packages before upgrading the host. The committed
+module requirement includes the workflow package and contains no local
+filesystem replacement; a workspace is optional for joint development.
+
 HTTP paths, JSON field names, WebSocket event names, protobuf field numbers and
 the gRPC wire service name `luckyagent.LuckyAgentService` are preserved. Generated
 Go clients and descriptors use this module's import path. Protocol sources and
@@ -79,17 +93,14 @@ WebSocket keepalive/disconnect behavior, protobuf identity, and the absence of
 LuckyAgent runtime imports. LuckyAgent's application-level API tests remain in
 its `internal/apiapp` and `internal/channelapp/websocket` packages.
 
-During local extraction, keep this checkout next to `luckyagent-gateway` and
-use an untracked `go.work` with both directories. Before publication, add a
-workspace-only version replacement:
+During local extraction, use an untracked `go.work` with all three module roots
+(adjust these paths to the actual checkout locations):
 
 ```bash
 go work init . ../luckyagent-gateway ../luckyagent-tools
-go work edit -replace=github.com/yurika0211/luckyagent-gateway@v0.2.1=../luckyagent-gateway
-go work edit -replace=github.com/yurika0211/luckyagent-tools@v0.2.1=../luckyagent-tools
 ```
 
-The committed `go.mod` contains release dependencies and no local replacement.
-After the repositories and `v0.2.1` tags are published, verify a clean downstream
-build with `GOWORK=off`. The initial extraction retains the MIT license and
-attribution from LuckyAgent.
+The committed `go.mod` pins downloadable dependency versions and no local
+replacement. Verify downstream builds with `GOWORK=off` after upgrading module
+requirements. The extraction retains the MIT license and attribution from
+LuckyAgent.
