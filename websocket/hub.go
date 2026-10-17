@@ -1,0 +1,549 @@
+package websocket
+
+import (
+	"context"
+	"encoding/json"
+	"net"
+	"net/http"
+	"net/url"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/gorilla/websocket"
+	logger "log/slog"
+)
+
+// Client represents a single websocket connection.
+type Client struct {
+	ID         string
+	SessionID  string
+	Conn       *websocket.Conn
+	Hub        *Hub
+	Send       chan *Message
+	LastActive time.Time
+	writeWait  time.Duration
+	pongWait   time.Duration
+	pingPeriod time.Duration
+
+	sendMu sync.Mutex
+	closed bool
+}
+
+// TrySend enqueues msg for delivery to the client. It returns false instead
+// of panicking if the client has already disconnected (Send closed) or its
+// outbound buffer is full — callers that need disconnect cleanup should
+// treat a false return as "unregister this client".
+func (c *Client) TrySend(msg *Message) (ok bool) {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if c.closed {
+		return false
+	}
+	// Send is exported for compatibility with older callers and tests. A
+	// caller that closes it directly can race with this method, so keep a
+	// closed channel from taking down the HTTP server.
+	defer func() {
+		if recover() != nil {
+			c.closed = true
+			ok = false
+		}
+	}()
+	select {
+	case c.Send <- msg:
+		return true
+	default:
+		return false
+	}
+}
+
+// Close marks the client as disconnected and closes Send exactly once. Safe
+// to call concurrently and more than once.
+func (c *Client) Close() {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if c.closed {
+		return
+	}
+	c.closed = true
+	// Keep shutdown safe for legacy callers that may have closed Send
+	// directly. Production code uses Close, but this boundary must not panic
+	// when an older client is still connected during an upgrade.
+	defer func() { _ = recover() }()
+	close(c.Send)
+}
+
+// Hub coordinates websocket clients and session broadcasts.
+type Hub struct {
+	mu         sync.RWMutex
+	clients    map[string]*Client
+	sessions   map[string]map[string]bool
+	register   chan *Client
+	unregister chan *Client
+	broadcast  chan *Message
+	handler    MessageHandler
+	upgrader   websocket.Upgrader
+	writeWait  time.Duration
+	pongWait   time.Duration
+	pingPeriod time.Duration
+	stats      HubStats
+	ctx        context.Context
+	cancel     context.CancelFunc
+}
+
+// HubStats tracks hub counters.
+type HubStats struct {
+	mu            sync.RWMutex
+	TotalConns    int64
+	ActiveConns   int64
+	TotalMessages int64
+	Errors        int64
+}
+
+// MessageHandler processes messages received from a client.
+type MessageHandler interface {
+	HandleMessage(client *Client, msg *Message)
+}
+
+// ReconnectHandler replays durable session events to a newly connected client.
+type ReconnectHandler interface {
+	HandleReconnect(client *Client, msg *Message)
+}
+
+// HubConfig controls websocket timings and buffer sizes.
+type HubConfig struct {
+	WriteWait       time.Duration
+	PongWait        time.Duration
+	PingPeriod      time.Duration
+	MaxMessageSize  int64
+	ReadBufferSize  int
+	WriteBufferSize int
+}
+
+// DefaultHubConfig returns sane defaults for local websocket chat usage.
+func DefaultHubConfig() HubConfig {
+	return HubConfig{
+		WriteWait:       10 * time.Second,
+		PongWait:        90 * time.Second,
+		PingPeriod:      20 * time.Second,
+		MaxMessageSize:  64 * 1024,
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+	}
+}
+
+// NewHub constructs a websocket hub.
+func NewHub(handler MessageHandler, cfg HubConfig) *Hub {
+	ctx, cancel := context.WithCancel(context.Background())
+	defaults := DefaultHubConfig()
+	if cfg.WriteWait <= 0 {
+		cfg.WriteWait = defaults.WriteWait
+	}
+	if cfg.PongWait <= 0 {
+		cfg.PongWait = defaults.PongWait
+	}
+	if cfg.PingPeriod <= 0 || cfg.PingPeriod >= cfg.PongWait {
+		cfg.PingPeriod = cfg.PongWait * 9 / 10
+		if cfg.PingPeriod > 20*time.Second {
+			cfg.PingPeriod = 20 * time.Second
+		}
+		if cfg.PingPeriod <= 0 || cfg.PingPeriod >= cfg.PongWait {
+			cfg.PingPeriod = cfg.PongWait / 2
+		}
+	}
+	return &Hub{
+		clients:    make(map[string]*Client),
+		sessions:   make(map[string]map[string]bool),
+		register:   make(chan *Client),
+		unregister: make(chan *Client),
+		broadcast:  make(chan *Message, 256),
+		handler:    handler,
+		writeWait:  cfg.WriteWait,
+		pongWait:   cfg.PongWait,
+		pingPeriod: cfg.PingPeriod,
+		upgrader: websocket.Upgrader{
+			ReadBufferSize:  cfg.ReadBufferSize,
+			WriteBufferSize: cfg.WriteBufferSize,
+			CheckOrigin: func(r *http.Request) bool {
+				origin := r.Header.Get("Origin")
+				if origin == "" {
+					return true
+				}
+
+				originURL, err := url.Parse(origin)
+				if err != nil {
+					return false
+				}
+
+				originHost := originURL.Hostname()
+				requestHost := r.Host
+				if host, _, err := net.SplitHostPort(r.Host); err == nil {
+					requestHost = host
+				}
+
+				return sameHostOrLoopback(originHost, requestHost)
+			},
+		},
+		ctx:    ctx,
+		cancel: cancel,
+	}
+}
+
+func sameHostOrLoopback(originHost, requestHost string) bool {
+	originHost = strings.TrimSpace(strings.Trim(originHost, "[]"))
+	requestHost = strings.TrimSpace(strings.Trim(requestHost, "[]"))
+	if originHost == "" || requestHost == "" {
+		return false
+	}
+	if strings.EqualFold(originHost, requestHost) {
+		return true
+	}
+	return isLoopbackHost(originHost) && isLoopbackHost(requestHost)
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// Run starts the hub event loop.
+func (h *Hub) Run() {
+	logger.Info("WebSocket Hub started")
+	for {
+		select {
+		case <-h.ctx.Done():
+			logger.Info("WebSocket Hub shutting down")
+			h.closeAll()
+			return
+		case client := <-h.register:
+			h.mu.Lock()
+			h.clients[client.ID] = client
+			if h.sessions[client.SessionID] == nil {
+				h.sessions[client.SessionID] = make(map[string]bool)
+			}
+			h.sessions[client.SessionID][client.ID] = true
+			h.mu.Unlock()
+
+			h.stats.mu.Lock()
+			h.stats.ActiveConns++
+			h.stats.TotalConns++
+			h.stats.mu.Unlock()
+			logger.Info("client connected", "client_id", client.ID, "session", client.SessionID)
+
+		case client := <-h.unregister:
+			h.unregisterClient(client)
+
+		case msg := <-h.broadcast:
+			var failed []*Client
+			h.mu.RLock()
+			if msg.SessionID == "" {
+				for _, client := range h.clients {
+					if !client.TrySend(msg) {
+						failed = append(failed, client)
+					}
+				}
+			} else if sess, ok := h.sessions[msg.SessionID]; ok {
+				for clientID := range sess {
+					if client, ok := h.clients[clientID]; ok {
+						if !client.TrySend(msg) {
+							failed = append(failed, client)
+						}
+					}
+				}
+			}
+			h.mu.RUnlock()
+			// The hub owns this event loop, so sending unregister to its own
+			// unbuffered channel here would deadlock the API forever. Remove
+			// failed clients directly after releasing the read lock.
+			for _, client := range failed {
+				h.unregisterClient(client)
+			}
+
+			h.stats.mu.Lock()
+			h.stats.TotalMessages++
+			h.stats.mu.Unlock()
+		}
+	}
+}
+
+// Stop stops the hub loop.
+func (h *Hub) Stop() {
+	h.cancel()
+}
+
+func (h *Hub) closeAll() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	for id, client := range h.clients {
+		client.Close()
+		client.Conn.Close()
+		delete(h.clients, id)
+	}
+	h.sessions = make(map[string]map[string]bool)
+}
+
+func (h *Hub) unregisterClient(client *Client) {
+	if client == nil {
+		return
+	}
+
+	sessionID := client.SessionID
+	h.mu.Lock()
+	if _, ok := h.clients[client.ID]; ok {
+		delete(h.clients, client.ID)
+		if sess, ok := h.sessions[sessionID]; ok {
+			delete(sess, client.ID)
+			if len(sess) == 0 {
+				delete(h.sessions, sessionID)
+			}
+		}
+		client.Close()
+	} else {
+		h.mu.Unlock()
+		return
+	}
+	h.mu.Unlock()
+
+	h.stats.mu.Lock()
+	h.stats.ActiveConns--
+	h.stats.mu.Unlock()
+	logger.Info("client disconnected", "client_id", client.ID, "session", client.SessionID)
+}
+
+func (h *Hub) requestUnregister(client *Client) {
+	select {
+	case h.unregister <- client:
+	case <-h.ctx.Done():
+	}
+}
+
+// ServeHTTP upgrades the request to websocket and registers the client.
+func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.URL.Query().Get("session")
+	if sessionID == "" {
+		sessionID = "default"
+	}
+
+	conn, err := h.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		logger.Error("WebSocket upgrade failed", "error", err)
+		return
+	}
+
+	client := &Client{
+		ID:         generateID(),
+		SessionID:  sessionID,
+		Conn:       conn,
+		Hub:        h,
+		Send:       make(chan *Message, 256),
+		LastActive: time.Now(),
+		writeWait:  h.writeWait,
+		pongWait:   h.pongWait,
+		pingPeriod: h.pingPeriod,
+	}
+
+	select {
+	case h.register <- client:
+	case <-h.ctx.Done():
+		client.Close()
+		_ = conn.Close()
+		return
+	}
+	go client.writePump()
+	go client.readPump()
+}
+
+// Broadcast sends one message to every connected client. An empty session id
+// is the fan-out key used by the hub loop.
+func (h *Hub) Broadcast(msg *Message) {
+	if h == nil || msg == nil {
+		return
+	}
+	msg.SessionID = ""
+	select {
+	case h.broadcast <- msg:
+	case <-h.ctx.Done():
+	}
+}
+
+// SendToSession broadcasts a message to a session.
+func (h *Hub) SendToSession(sessionID string, msg *Message) {
+	msg.SessionID = sessionID
+	h.broadcast <- msg
+}
+
+// SendToClient pushes a message to a single client.
+func (h *Hub) SendToClient(clientID string, msg *Message) {
+	h.mu.RLock()
+	client, ok := h.clients[clientID]
+	h.mu.RUnlock()
+	if ok {
+		if !client.TrySend(msg) {
+			go h.requestUnregister(client)
+		}
+	}
+}
+
+// GetStats returns the current hub stats snapshot.
+func (h *Hub) GetStats() HubStats {
+	h.stats.mu.RLock()
+	defer h.stats.mu.RUnlock()
+	return HubStats{
+		TotalConns:    h.stats.TotalConns,
+		ActiveConns:   h.stats.ActiveConns,
+		TotalMessages: h.stats.TotalMessages,
+		Errors:        h.stats.Errors,
+	}
+}
+
+// SessionCount returns the number of active sessions.
+func (h *Hub) SessionCount() int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.sessions)
+}
+
+// ClientCount returns the number of active clients.
+func (h *Hub) ClientCount() int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.clients)
+}
+
+func (c *Client) readPump() {
+	defer func() {
+		c.Hub.requestUnregister(c)
+		c.Conn.Close()
+	}()
+
+	c.Conn.SetReadLimit(c.readLimit())
+	c.extendReadDeadline()
+	c.Conn.SetPingHandler(func(payload string) error {
+		c.extendReadDeadline()
+		deadline := time.Now().Add(c.writeTimeout())
+		return c.Conn.WriteControl(websocket.PongMessage, []byte(payload), deadline)
+	})
+	c.Conn.SetPongHandler(func(string) error {
+		c.extendReadDeadline()
+		return nil
+	})
+
+	for {
+		_, raw, err := c.Conn.ReadMessage()
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				logger.Error("WebSocket read error", "client_id", c.ID, "error", err)
+				c.Hub.stats.mu.Lock()
+				c.Hub.stats.Errors++
+				c.Hub.stats.mu.Unlock()
+			}
+			break
+		}
+
+		msg, err := ParseMessage(raw)
+		if err != nil {
+			logger.Error("WebSocket parse error", "client_id", c.ID, "error", err)
+			errMsg, _ := NewMessage(TypeError, c.SessionID, ErrorData{
+				Code:    "PARSE_ERROR",
+				Message: err.Error(),
+			})
+			c.TrySend(errMsg)
+			continue
+		}
+
+		c.extendReadDeadline()
+
+		if msg.Type == TypePing {
+			pong, _ := NewMessage(TypePong, c.SessionID, nil)
+			c.TrySend(pong)
+			continue
+		}
+
+		if msg.Type == TypeReconnect {
+			if reconnecter, ok := c.Hub.handler.(ReconnectHandler); ok {
+				reconnecter.HandleReconnect(c, msg)
+			} else {
+				status, _ := NewMessage(TypeStatus, c.SessionID, StatusData{
+					State:   "connected",
+					Message: "reconnected",
+				})
+				c.TrySend(status)
+			}
+			continue
+		}
+
+		if c.Hub.handler != nil {
+			c.Hub.handler.HandleMessage(c, msg)
+		}
+	}
+}
+
+func (c *Client) writePump() {
+	ticker := time.NewTicker(c.pingInterval())
+	defer func() {
+		ticker.Stop()
+		c.Conn.Close()
+	}()
+
+	for {
+		select {
+		case msg, ok := <-c.Send:
+			c.Conn.SetWriteDeadline(time.Now().Add(c.writeTimeout()))
+			if !ok {
+				c.Conn.WriteMessage(websocket.CloseMessage, []byte{})
+				return
+			}
+
+			data, err := json.Marshal(msg)
+			if err != nil {
+				logger.Error("WebSocket marshal error", "client_id", c.ID, "error", err)
+				continue
+			}
+
+			if err := c.Conn.WriteMessage(websocket.TextMessage, data); err != nil {
+				logger.Error("WebSocket write error", "client_id", c.ID, "error", err)
+				return
+			}
+
+		case <-ticker.C:
+			c.Conn.SetWriteDeadline(time.Now().Add(c.writeTimeout()))
+			if err := c.Conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func (c *Client) extendReadDeadline() {
+	wait := 90 * time.Second
+	if c != nil && c.pongWait > 0 {
+		wait = c.pongWait
+	}
+	if c == nil || c.Conn == nil {
+		return
+	}
+	_ = c.Conn.SetReadDeadline(time.Now().Add(wait))
+	c.LastActive = time.Now()
+}
+
+func (c *Client) writeTimeout() time.Duration {
+	if c != nil && c.writeWait > 0 {
+		return c.writeWait
+	}
+	return 10 * time.Second
+}
+
+func (c *Client) pingInterval() time.Duration {
+	if c != nil && c.pingPeriod > 0 {
+		return c.pingPeriod
+	}
+	return 20 * time.Second
+}
+
+func (c *Client) readLimit() int64 {
+	return 64 * 1024
+}

@@ -1,0 +1,4 @@
+
+# Local multi-module development only
+go.work
+go.work.sum

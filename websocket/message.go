@@ -1,0 +1,237 @@
+package websocket
+
+import (
+	"encoding/json"
+	"fmt"
+	gateway "github.com/yurika0211/luckyagent-gateway"
+	"sync"
+	"time"
+
+	"github.com/yurika0211/luckyagent-gateway/turn"
+)
+
+// MessageType WebSocket 消息类型
+type MessageType string
+
+const (
+	// 客户端 → 服务端
+	TypeChat             MessageType = "chat"              // 聊天消息
+	TypeLucky            MessageType = "lucky"             // 多段消息收集：on/off/status/cancel
+	TypeCancel           MessageType = "cancel"            // 取消进行中的 agent run
+	TypeApprovalResponse MessageType = "approval_response" // 批准/拒绝/补充输入
+	TypeStreamAck        MessageType = "stream_ack"        // 流式确认
+	TypePing             MessageType = "ping"              // 心跳 ping
+	TypeReconnect        MessageType = "reconnect"         // 断线重连
+
+	// 服务端 → 客户端
+	TypeStreamChunk MessageType = "stream_chunk" // 流式输出块
+	TypeStreamEnd   MessageType = "stream_end"   // 流式输出结束
+	TypeReasoning   MessageType = "reasoning"    // 推理/思考摘要
+	TypeToolCall    MessageType = "tool_call"    // 工具调用通知
+	TypeToolResult  MessageType = "tool_result"  // 工具调用结果
+	TypeCompact     MessageType = "compact"      // 会话上下文压缩进度
+	TypeApproval    MessageType = "approval"     // 需要用户批准或补充输入
+	TypeStatus      MessageType = "status"       // 状态更新
+	TypeTaskEvent   MessageType = "task_event"   // 子代理和后台任务进度
+	TypeError       MessageType = "error"        // 错误消息
+	TypePong        MessageType = "pong"         // 心跳 pong
+)
+
+// Message WebSocket 消息协议
+type Message struct {
+	Type      MessageType     `json:"type"`
+	SessionID string          `json:"session_id,omitempty"`
+	ID        string          `json:"id,omitempty"`        // 消息唯一 ID
+	EventID   string          `json:"event_id,omitempty"`  // 可持久化重放 cursor
+	ParentID  string          `json:"parent_id,omitempty"` // 回复的消息 ID
+	RunID     string          `json:"run_id,omitempty"`    // 所属持久化运行 ID
+	Timestamp time.Time       `json:"timestamp"`
+	Data      json.RawMessage `json:"data"`
+}
+
+// ChatData 聊天消息数据
+type ChatData struct {
+	Message     string               `json:"message"`
+	Stream      bool                 `json:"stream,omitempty"`
+	MaxIter     int                  `json:"max_iterations,omitempty"`
+	ProfileID   string               `json:"profile_id,omitempty"`
+	Attachments []gateway.Attachment `json:"attachments,omitempty"`
+}
+
+// LuckyData 控制当前 session 的多段消息收集。
+type LuckyData struct {
+	Action string `json:"action"`
+}
+
+// CancelData 取消进行中的 agent run。空 session_id 表示当前连接绑定的 session。
+type CancelData struct {
+	SessionID string `json:"session_id,omitempty"`
+}
+
+// ApprovalResponseData is the client's decision for a pending HITL request.
+type ApprovalResponseData struct {
+	RequestID string `json:"request_id"`
+	Provider  string `json:"provider,omitempty"` // runtime | codex | grok
+	Decision  string `json:"decision"`           // allow | deny | cancel | submit
+	Input     string `json:"input,omitempty"`
+}
+
+// ApprovalRequestData is pushed when the agent is waiting on the user.
+type ApprovalRequestData struct {
+	RequestID string            `json:"request_id"`
+	Provider  string            `json:"provider,omitempty"`
+	Kind      string            `json:"kind,omitempty"` // approval | input | credential
+	Tool      string            `json:"tool,omitempty"`
+	Action    string            `json:"action,omitempty"`
+	Reason    string            `json:"reason,omitempty"`
+	Prompt    string            `json:"prompt,omitempty"`
+	Summary   string            `json:"summary,omitempty"`
+	Secure    bool              `json:"secure,omitempty"`
+	Fields    map[string]string `json:"fields,omitempty"`
+}
+
+// StreamChunkData 流式输出块数据
+type StreamChunkData struct {
+	Content string `json:"content"`
+	Done    bool   `json:"done"`
+}
+
+// StreamEndData 流式输出结束数据
+type StreamEndData struct {
+	FullResponse string               `json:"full_response"`
+	Iterations   int                  `json:"iterations"`
+	CreatedAt    *time.Time           `json:"created_at,omitempty"`
+	Usage        *turn.TokenUsage     `json:"usage,omitempty"`
+	Attachments  []gateway.Attachment `json:"attachments,omitempty"`
+}
+
+// ReasoningData 推理摘要数据
+type ReasoningData struct {
+	Summary string `json:"summary"`
+	Content string `json:"content,omitempty"` // 真实推理文本（Stage=="content" 时有值）
+	Round   int    `json:"round,omitempty"`
+	Stage   string `json:"stage,omitempty"` // "start" | "continue" | "update" | "content"
+}
+
+// ToolCallData 工具调用通知数据
+type ToolCallData struct {
+	Name       string                 `json:"name"`
+	Params     map[string]interface{} `json:"params,omitempty"`
+	Args       string                 `json:"args,omitempty"`
+	Display    string                 `json:"display,omitempty"`
+	Phase      string                 `json:"phase"` // "start" | "progress" | "end"
+	Round      int                    `json:"round,omitempty"`
+	GroupID    string                 `json:"group_id,omitempty"`
+	StepID     string                 `json:"step_id,omitempty"`
+	Visibility string                 `json:"visibility,omitempty"` // "visible" | "compact" | "hidden"
+}
+
+// ToolResultData 工具调用结果数据
+type ToolResultData struct {
+	Name        string               `json:"name"`
+	Success     bool                 `json:"success"`
+	Output      string               `json:"output"`
+	Display     string               `json:"display,omitempty"`
+	Round       int                  `json:"round,omitempty"`
+	GroupID     string               `json:"group_id,omitempty"`
+	StepID      string               `json:"step_id,omitempty"`
+	Visibility  string               `json:"visibility,omitempty"` // "visible" | "compact" | "hidden"
+	Attachments []gateway.Attachment `json:"attachments,omitempty"`
+}
+
+// CompactData is session context compaction progress for client UI.
+// phase: start | progress | done | failed | degraded
+type CompactData struct {
+	Phase               string `json:"phase"`
+	Trigger             string `json:"trigger,omitempty"`
+	Message             string `json:"message,omitempty"`
+	BoundaryID          string `json:"boundary_id,omitempty"`
+	SummarySource       string `json:"summary_source,omitempty"`
+	Chunk               int    `json:"chunk,omitempty"`
+	Chunks              int    `json:"chunks,omitempty"`
+	PreTokenEstimate    int    `json:"pre_token_estimate,omitempty"`
+	PostTokenEstimate   int    `json:"post_token_estimate,omitempty"`
+	DroppedMessages     int    `json:"dropped_messages,omitempty"`
+	RetainedMessages    int    `json:"retained_messages,omitempty"`
+	RestoredAttachments int    `json:"restored_attachments,omitempty"`
+	Model               string `json:"model,omitempty"`
+	Error               string `json:"error,omitempty"`
+}
+
+// StatusData 状态更新数据
+type StatusData struct {
+	State   string `json:"state"` // "thinking" | "executing" | "idle" | "error"
+	Message string `json:"message,omitempty"`
+}
+
+// TaskEventData is a stored task event pushed to connected clients.
+type TaskEventData struct {
+	Type               string            `json:"type"`
+	TaskID             string            `json:"task_id"`
+	ParentID           string            `json:"parent_id,omitempty"`
+	ExecutionSessionID string            `json:"execution_session_id,omitempty"`
+	ParentSessionID    string            `json:"parent_session_id,omitempty"`
+	Role               string            `json:"role,omitempty"`
+	Status             string            `json:"status,omitempty"`
+	Mode               string            `json:"mode,omitempty"`
+	Message            string            `json:"message,omitempty"`
+	Progress           float64           `json:"progress,omitempty"`
+	ChildID            string            `json:"child_id,omitempty"`
+	Error              string            `json:"error,omitempty"`
+	SessionID          string            `json:"session_id,omitempty"`
+	Description        string            `json:"description,omitempty"`
+	Metadata           map[string]string `json:"metadata,omitempty"`
+}
+
+// ErrorData 错误消息数据
+type ErrorData struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+// ReconnectData 断线重连数据
+type ReconnectData struct {
+	LastMessageID string `json:"last_message_id"`
+}
+
+// NewMessage 创建新消息
+func NewMessage(msgType MessageType, sessionID string, data interface{}) (*Message, error) {
+	raw, err := json.Marshal(data)
+	if err != nil {
+		return nil, err
+	}
+	id := generateID()
+	return &Message{
+		Type:      msgType,
+		SessionID: sessionID,
+		ID:        id,
+		EventID:   id,
+		Timestamp: time.Now().UTC(),
+		Data:      raw,
+	}, nil
+}
+
+// ParseMessage 解析 WebSocket 消息
+func ParseMessage(raw []byte) (*Message, error) {
+	var msg Message
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return nil, err
+	}
+	return &msg, nil
+}
+
+// ParseData 解析消息中的 Data 字段
+func (m *Message) ParseData(v interface{}) error {
+	return json.Unmarshal(m.Data, v)
+}
+
+// ID 生成器
+var idCounter int64
+var idMu sync.Mutex
+
+func generateID() string {
+	idMu.Lock()
+	defer idMu.Unlock()
+	idCounter++
+	return fmt.Sprintf("ws-%d-%d", time.Now().UnixNano(), idCounter)
+}
