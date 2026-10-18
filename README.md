@@ -17,7 +17,7 @@ The root package is named `transport` and provides:
 - `websocket`: wire messages, clients, session broadcast, keepalive, connection
   management, durable run storage and reconnect replay. The host executes runs.
 - `resources`: task/tree/feedback, approvals, cron, autonomy, Skill installation
-  and collaboration controllers, using injected public tool-runtime ports.
+  and collaboration controllers, using injected public orchestration/tool ports.
 - `health`: health check registration and reports.
 - `grpc`: protobuf messages, client, service contract and gateway registration.
 - `workflow`: optional Gin handlers over the public tool-module DAG engine;
@@ -67,6 +67,11 @@ storage opening, Agent execution, configuration checks and orchestrator session
 provisioning. `NewHTTPServer` does not start a goroutine: the host owns listening,
 resource cleanup and graceful shutdown.
 
+Task, collaboration and autonomy engines now come from the independent
+`luckyagent-orchestrator` module. HTTP contracts stay here. See
+[orchestration resource adapters](docs/orchestration.md) for migration details
+and the `v0.1.0` engine dependency.
+
 ## Compatibility and tests
 
 `workflow.NewServerHandlers` accepts a `luckyagent-tools/workflow.WorkflowEngine`
@@ -76,10 +81,10 @@ transport package does not import Gin. The host retains action registration,
 authentication, listening and shutdown ownership.
 
 This adapter uses execution packages introduced after tools v0.2.2. For
-joint changes, merge tools first and pin its merged commit (a Go pseudo-version)
-or a release containing the packages before upgrading the host. The committed
-module requirement includes the workflow package and contains no local
-filesystem replacement; a workspace is optional for joint development.
+joint changes, publish the orchestrator first, then tools and API, and pin their
+merged commits or releases before upgrading the host. The committed module
+requirement includes the workflow package and contains no local filesystem
+replacement. A workspace is optional for joint development.
 
 HTTP paths, JSON field names, WebSocket event names, protobuf field numbers and
 the gRPC wire service name `luckyagent.LuckyAgentService` are preserved. Generated
@@ -96,14 +101,14 @@ WebSocket keepalive/disconnect behavior, protobuf identity, and the absence of
 LuckyAgent runtime imports. LuckyAgent's application-level API tests remain in
 its `internal/apiapp` and `internal/channelapp/websocket` packages.
 
-During local extraction, use an untracked `go.work` with all three module roots
+During local extraction, use an untracked `go.work` with all module roots
 (adjust these paths to the actual checkout locations):
 
 ```bash
-go work init . ../luckyagent-gateway ../luckyagent-tools
+go work init . ../luckyagent-gateway ../luckyagent-tools ../luckyagent-orchestrator
 ```
 
-The committed `go.mod` pins downloadable dependency versions and no local
-replacement. Verify downstream builds with `GOWORK=off` after upgrading module
-requirements. The extraction retains the MIT license and attribution from
+The committed `go.mod` pins published dependency versions and contains no local
+replacement. Downstream builds use `GOWORK=off`; workspaces are only needed for
+local changes. The extraction retains the MIT license and attribution from
 LuckyAgent.

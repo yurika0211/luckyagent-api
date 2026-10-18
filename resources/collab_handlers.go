@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/yurika0211/luckyagent-tools/collab"
+	"github.com/yurika0211/luckyagent-orchestrator/collab"
 )
 
 // HandleAgentsList 列出所有注册的 Agent
