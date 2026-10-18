@@ -63,3 +63,29 @@ func TestRateLimiterAllow(t *testing.T) {
 		}
 	}
 }
+
+func TestLimiterPrunesExpiredIdentitiesWithoutBackgroundWorker(t *testing.T) {
+	rl := &Limiter{limit: 2, clients: map[string]*clientBucket{
+		"expired": {count: 2, resetAt: time.Now().Add(-time.Second)},
+	}}
+	if !rl.Allow("fresh") {
+		t.Fatal("fresh identity was rejected")
+	}
+	if _, exists := rl.clients["expired"]; exists {
+		t.Fatal("expired identity was retained")
+	}
+	if !rl.Allow("fresh") || rl.Allow("fresh") {
+		t.Fatal("unexpected fixed-window quota")
+	}
+	if rl.clients["fresh"].count != 2 {
+		t.Fatal("rejected requests must not grow the counter")
+	}
+}
+
+func TestLimiterNormalizesNonPositiveLimit(t *testing.T) {
+	rl := NewLimiter(0)
+	defer rl.Stop()
+	if rl.limit != DefaultConfig().RateLimit {
+		t.Fatalf("limit=%d", rl.limit)
+	}
+}

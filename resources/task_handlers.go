@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	transport "github.com/yurika0211/luckyagent-api"
 	"io"
 	"net/http"
 	"sort"
@@ -265,8 +266,8 @@ func buildTaskTreeNode(store taskstore.Store, record taskstore.Record, childrenB
 func (s *Controller) HandleTaskFeedback(w http.ResponseWriter, r *http.Request, store taskstore.Store, taskID string) {
 	var req taskFeedbackRequest
 	if r.Body != nil {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
-			s.sendError(w, "invalid feedback body", http.StatusBadRequest, err.Error())
+		if err := transport.DecodeJSON(w, r, &req, transport.DefaultJSONBodyLimit); err != nil && !errors.Is(err, io.EOF) {
+			transport.SendRequestError(w, err)
 			return
 		}
 	}
@@ -318,8 +319,8 @@ func (s *Controller) HandleTaskFeedback(w http.ResponseWriter, r *http.Request, 
 func (s *Controller) HandleTaskCancel(w http.ResponseWriter, r *http.Request, store taskstore.Store, taskID string) {
 	var req taskCancelRequest
 	if r.Body != nil {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
-			s.sendError(w, "invalid cancel body", http.StatusBadRequest, err.Error())
+		if err := transport.DecodeJSON(w, r, &req, transport.DefaultJSONBodyLimit); err != nil && !errors.Is(err, io.EOF) {
+			transport.SendRequestError(w, err)
 			return
 		}
 	}

@@ -26,8 +26,8 @@ func TestAuthenticationPreservesHeaderOnlyAndLocalOnlyPolicies(t *testing.T) {
 			handler := policy.Authenticate(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) }))
 			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
 			req.RemoteAddr = tc.remote
+			req.Host = "localhost"
 			req.Header.Set("X-API-Key", tc.key)
-			req.Header.Set("X-Forwarded-For", "127.0.0.1")
 			w := httptest.NewRecorder()
 			handler.ServeHTTP(w, req)
 			if w.Code != tc.want {

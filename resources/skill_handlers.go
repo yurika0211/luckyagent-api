@@ -2,8 +2,8 @@ package resources
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
+	transport "github.com/yurika0211/luckyagent-api"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -331,7 +331,10 @@ func (s *Controller) HandleSkillUninstall(w http.ResponseWriter, r *http.Request
 		Purge bool `json:"purge"`
 	}
 	if r.Body != nil {
-		_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req)
+		if err := transport.DecodeJSON(w, r, &req, 64<<10); err != nil && !errors.Is(err, io.EOF) {
+			transport.SendRequestError(w, err)
+			return
+		}
 	}
 
 	versionID, err := installer.Uninstall(name, req.Purge)
@@ -382,8 +385,8 @@ func (s *Controller) HandleSkillRollback(w http.ResponseWriter, r *http.Request,
 	var req struct {
 		VersionID string `json:"version_id"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req); err != nil && err != io.EOF {
-		s.sendError(w, "invalid request body", http.StatusBadRequest, err.Error())
+	if err := transport.DecodeJSON(w, r, &req, 64<<10); err != nil && !errors.Is(err, io.EOF) {
+		transport.SendRequestError(w, err)
 		return
 	}
 	if strings.TrimSpace(req.VersionID) == "" {
@@ -433,6 +436,12 @@ func (s *Controller) HandleSkillInstallPrepare(w http.ResponseWriter, r *http.Re
 		id, err = s.StageSkillLocalPath(r, installer)
 	}
 	if err != nil {
+		var requestError *transport.RequestError
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &requestError) || errors.As(err, &tooLarge) {
+			transport.SendRequestError(w, err)
+			return
+		}
 		s.sendError(w, "stage skill failed", http.StatusBadRequest, err.Error())
 		return
 	}
@@ -513,7 +522,7 @@ func (s *Controller) StageSkillLocalPath(r *http.Request, installer *tool.Instal
 		Source string `json:"source"`
 		Path   string `json:"path"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 64<<10)).Decode(&req); err != nil && err != io.EOF {
+	if err := transport.DecodeJSON(nil, r, &req, 64<<10); err != nil && !errors.Is(err, io.EOF) {
 		return "", err
 	}
 	if strings.TrimSpace(req.Path) == "" {
@@ -570,18 +579,26 @@ func (s *Controller) HandleSkillInstalls(w http.ResponseWriter, r *http.Request,
 			AcceptWarnings bool `json:"accept_warnings"`
 		}
 		if r.Body != nil {
-			_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req)
+			if err := transport.DecodeJSON(w, r, &req, 64<<10); err != nil && !errors.Is(err, io.EOF) {
+				transport.SendRequestError(w, err)
+				return
+			}
 		}
 		rec, err := installer.Confirm(id, req.AcceptWarnings)
 		if err != nil {
 			status := http.StatusConflict
+			errorCode := "conflict"
 			if rec == nil {
 				status = http.StatusNotFound
+				errorCode = "not_found"
 			}
 			s.sendJSON(w, status, map[string]interface{}{
-				"error":   "confirm failed",
-				"details": err.Error(),
-				"install": installRecordDTO(rec),
+				"error":      "confirm failed",
+				"code":       status,
+				"error_code": errorCode,
+				"request_id": w.Header().Get("X-Request-ID"),
+				"details":    err.Error(),
+				"install":    installRecordDTO(rec),
 			})
 			return
 		}

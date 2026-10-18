@@ -3,6 +3,7 @@ package websocket
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/url"
@@ -16,18 +17,41 @@ import (
 
 // Client represents a single websocket connection.
 type Client struct {
-	ID         string
-	SessionID  string
-	Conn       *websocket.Conn
-	Hub        *Hub
-	Send       chan *Message
-	LastActive time.Time
-	writeWait  time.Duration
-	pongWait   time.Duration
-	pingPeriod time.Duration
+	ID             string
+	SessionID      string
+	Conn           *websocket.Conn
+	Hub            *Hub
+	Send           chan *Message
+	LastActive     time.Time
+	writeWait      time.Duration
+	pongWait       time.Duration
+	pingPeriod     time.Duration
+	maxMessageSize int64
 
-	sendMu sync.Mutex
-	closed bool
+	sendMu        sync.Mutex
+	closed        bool
+	done          chan struct{}
+	senders       sync.WaitGroup
+	replaying     bool
+	replayPending []*Message
+}
+
+var (
+	ErrClientClosed = errors.New("websocket client closed")
+	ErrReplayActive = errors.New("websocket replay already active")
+)
+
+const clientSendBuffer = 256
+
+func (c *Client) markClosedLocked() {
+	if c.done == nil {
+		c.done = make(chan struct{})
+	}
+	if !c.closed {
+		c.closed = true
+		close(c.done)
+	}
+	c.replayPending = nil
 }
 
 // TrySend enqueues msg for delivery to the client. It returns false instead
@@ -45,10 +69,17 @@ func (c *Client) TrySend(msg *Message) (ok bool) {
 	// closed channel from taking down the HTTP server.
 	defer func() {
 		if recover() != nil {
-			c.closed = true
+			c.markClosedLocked()
 			ok = false
 		}
 	}()
+	if c.replaying {
+		if len(c.replayPending) >= clientSendBuffer {
+			return false
+		}
+		c.replayPending = append(c.replayPending, msg)
+		return true
+	}
 	select {
 	case c.Send <- msg:
 		return true
@@ -57,15 +88,139 @@ func (c *Client) TrySend(msg *Message) (ok bool) {
 	}
 }
 
+// SendReliable waits for outbound capacity. Context cancellation, Close, and
+// Hub.Stop interrupt the wait. Close signals cancellation before waiting for
+// active senders, so a slow peer cannot deadlock connection shutdown.
+func (c *Client) SendReliable(ctx context.Context, msg *Message) (err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	c.sendMu.Lock()
+	if c.closed {
+		c.sendMu.Unlock()
+		return ErrClientClosed
+	}
+	if c.done == nil {
+		c.done = make(chan struct{})
+	}
+	done := c.done
+	c.senders.Add(1)
+	c.sendMu.Unlock()
+	defer c.senders.Done()
+	defer func() {
+		// Send remains exported for older callers that close it directly.
+		if recover() != nil {
+			c.sendMu.Lock()
+			c.markClosedLocked()
+			c.sendMu.Unlock()
+			err = ErrClientClosed
+		}
+	}()
+	var hubDone <-chan struct{}
+	if c.Hub != nil {
+		hubDone = c.Hub.ctx.Done()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-done:
+		return ErrClientClosed
+	case <-hubDone:
+		return context.Canceled
+	default:
+	}
+	select {
+	case c.Send <- msg:
+		return nil
+	case <-done:
+		return ErrClientClosed
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-hubDone:
+		return context.Canceled
+	}
+}
+
+// BeginReplay diverts live broadcasts into a bounded queue until EndReplay.
+// Call it before taking the durable replay snapshot, then use SendReliable for
+// that snapshot. Concurrent replay attempts must be serialized by the caller.
+func (c *Client) BeginReplay() error {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if c.closed {
+		return ErrClientClosed
+	}
+	if c.replaying {
+		return ErrReplayActive
+	}
+	c.replaying = true
+	return nil
+}
+
+// EndReplay flushes live broadcasts after the snapshot, skipping event IDs
+// already delivered by it. Live traffic remains bounded while flushing; a full
+// queue makes TrySend fail so the hub disconnects the peer for a later retry.
+// On error the caller must Close the client rather than resume a partial replay.
+func (c *Client) EndReplay(ctx context.Context, delivered map[string]bool) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if delivered == nil {
+		delivered = make(map[string]bool)
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		c.sendMu.Lock()
+		if c.closed {
+			c.sendMu.Unlock()
+			return ErrClientClosed
+		}
+		if len(c.replayPending) == 0 {
+			c.replaying = false
+			c.sendMu.Unlock()
+			return nil
+		}
+		pending := c.replayPending
+		c.replayPending = nil
+		c.sendMu.Unlock()
+		for _, msg := range pending {
+			if msg == nil {
+				continue
+			}
+			id := msg.EventID
+			if id == "" {
+				id = msg.ID
+			}
+			if id != "" && delivered[id] {
+				continue
+			}
+			if err := c.SendReliable(ctx, msg); err != nil {
+				return err
+			}
+			if id != "" {
+				delivered[id] = true
+			}
+		}
+	}
+}
+
 // Close marks the client as disconnected and closes Send exactly once. Safe
 // to call concurrently and more than once.
 func (c *Client) Close() {
 	c.sendMu.Lock()
-	defer c.sendMu.Unlock()
 	if c.closed {
+		c.sendMu.Unlock()
 		return
 	}
-	c.closed = true
+	c.markClosedLocked()
+	c.sendMu.Unlock()
+	if c.Conn != nil {
+		_ = c.Conn.Close()
+	}
+	c.senders.Wait()
 	// Keep shutdown safe for legacy callers that may have closed Send
 	// directly. Production code uses Close, but this boundary must not panic
 	// when an older client is still connected during an upgrade.
@@ -75,20 +230,21 @@ func (c *Client) Close() {
 
 // Hub coordinates websocket clients and session broadcasts.
 type Hub struct {
-	mu         sync.RWMutex
-	clients    map[string]*Client
-	sessions   map[string]map[string]bool
-	register   chan *Client
-	unregister chan *Client
-	broadcast  chan *Message
-	handler    MessageHandler
-	upgrader   websocket.Upgrader
-	writeWait  time.Duration
-	pongWait   time.Duration
-	pingPeriod time.Duration
-	stats      HubStats
-	ctx        context.Context
-	cancel     context.CancelFunc
+	mu             sync.RWMutex
+	clients        map[string]*Client
+	sessions       map[string]map[string]bool
+	register       chan *Client
+	unregister     chan *Client
+	broadcast      chan *Message
+	handler        MessageHandler
+	upgrader       websocket.Upgrader
+	writeWait      time.Duration
+	pongWait       time.Duration
+	pingPeriod     time.Duration
+	maxMessageSize int64
+	stats          HubStats
+	ctx            context.Context
+	cancel         context.CancelFunc
 }
 
 // HubStats tracks hub counters.
@@ -142,6 +298,9 @@ func NewHub(handler MessageHandler, cfg HubConfig) *Hub {
 	if cfg.PongWait <= 0 {
 		cfg.PongWait = defaults.PongWait
 	}
+	if cfg.MaxMessageSize <= 0 {
+		cfg.MaxMessageSize = defaults.MaxMessageSize
+	}
 	if cfg.PingPeriod <= 0 || cfg.PingPeriod >= cfg.PongWait {
 		cfg.PingPeriod = cfg.PongWait * 9 / 10
 		if cfg.PingPeriod > 20*time.Second {
@@ -152,15 +311,16 @@ func NewHub(handler MessageHandler, cfg HubConfig) *Hub {
 		}
 	}
 	return &Hub{
-		clients:    make(map[string]*Client),
-		sessions:   make(map[string]map[string]bool),
-		register:   make(chan *Client),
-		unregister: make(chan *Client),
-		broadcast:  make(chan *Message, 256),
-		handler:    handler,
-		writeWait:  cfg.WriteWait,
-		pongWait:   cfg.PongWait,
-		pingPeriod: cfg.PingPeriod,
+		clients:        make(map[string]*Client),
+		sessions:       make(map[string]map[string]bool),
+		register:       make(chan *Client),
+		unregister:     make(chan *Client),
+		broadcast:      make(chan *Message, 256),
+		handler:        handler,
+		writeWait:      cfg.WriteWait,
+		pongWait:       cfg.PongWait,
+		pingPeriod:     cfg.PingPeriod,
+		maxMessageSize: cfg.MaxMessageSize,
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  cfg.ReadBufferSize,
 			WriteBufferSize: cfg.WriteBufferSize,
@@ -280,7 +440,9 @@ func (h *Hub) closeAll() {
 
 	for id, client := range h.clients {
 		client.Close()
-		client.Conn.Close()
+		if client.Conn != nil {
+			_ = client.Conn.Close()
+		}
 		delete(h.clients, id)
 	}
 	h.sessions = make(map[string]map[string]bool)
@@ -335,15 +497,16 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	client := &Client{
-		ID:         generateID(),
-		SessionID:  sessionID,
-		Conn:       conn,
-		Hub:        h,
-		Send:       make(chan *Message, 256),
-		LastActive: time.Now(),
-		writeWait:  h.writeWait,
-		pongWait:   h.pongWait,
-		pingPeriod: h.pingPeriod,
+		ID:             generateID(),
+		SessionID:      sessionID,
+		Conn:           conn,
+		Hub:            h,
+		Send:           make(chan *Message, clientSendBuffer),
+		LastActive:     time.Now(),
+		writeWait:      h.writeWait,
+		pongWait:       h.pongWait,
+		pingPeriod:     h.pingPeriod,
+		maxMessageSize: h.maxMessageSize,
 	}
 
 	select {
@@ -363,17 +526,30 @@ func (h *Hub) Broadcast(msg *Message) {
 	if h == nil || msg == nil {
 		return
 	}
-	msg.SessionID = ""
+	copyMsg := *msg
+	copyMsg.SessionID = ""
 	select {
-	case h.broadcast <- msg:
+	case h.broadcast <- &copyMsg:
 	case <-h.ctx.Done():
 	}
 }
 
 // SendToSession broadcasts a message to a session.
 func (h *Hub) SendToSession(sessionID string, msg *Message) {
-	msg.SessionID = sessionID
-	h.broadcast <- msg
+	if h == nil || msg == nil {
+		return
+	}
+	copyMsg := *msg
+	copyMsg.SessionID = sessionID
+	select {
+	case <-h.ctx.Done():
+		return
+	default:
+	}
+	select {
+	case h.broadcast <- &copyMsg:
+	case <-h.ctx.Done():
+	}
 }
 
 // SendToClient pushes a message to a single client.
@@ -545,5 +721,8 @@ func (c *Client) pingInterval() time.Duration {
 }
 
 func (c *Client) readLimit() int64 {
+	if c != nil && c.maxMessageSize > 0 {
+		return c.maxMessageSize
+	}
 	return 64 * 1024
 }

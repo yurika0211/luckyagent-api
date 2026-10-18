@@ -2,7 +2,7 @@ package resources
 
 import (
 	"context"
-	"encoding/json"
+	transport "github.com/yurika0211/luckyagent-api"
 	"net/http"
 	"strings"
 	"time"
@@ -58,8 +58,8 @@ func (s *Controller) HandleApprovals(w http.ResponseWriter, r *http.Request) {
 		s.sendJSON(w, http.StatusOK, approvalsResponse{Approvals: approvals, Count: len(approvals)})
 	case http.MethodPost:
 		var req approvalResolutionRequest
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&req); err != nil {
-			s.sendError(w, "invalid approval request", http.StatusBadRequest, err.Error())
+		if err := transport.DecodeJSON(w, r, &req, 64*1024); err != nil {
+			transport.SendRequestError(w, err)
 			return
 		}
 		req.Provider = strings.ToLower(strings.TrimSpace(req.Provider))

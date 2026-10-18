@@ -4,6 +4,7 @@ package transport
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	logger "log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -20,8 +22,8 @@ import (
 // Config API Server 配置
 type Config struct {
 	Addr        string   `yaml:"addr,omitempty"`         // 监听地址，默认 :9090
-	APIKeys     []string `yaml:"api_keys,omitempty"`     // API Key 白名单（空=不鉴权）
-	EnableCORS  bool     `yaml:"enable_cors,omitempty"`  // 启用 CORS，默认 true
+	APIKeys     []string `yaml:"api_keys,omitempty"`     // API Key 白名单（空=仅允许经过校验的本机请求）
+	EnableCORS  bool     `yaml:"enable_cors,omitempty"`  // 启用 CORS，默认 false
 	CORSOrigins []string `yaml:"cors_origins,omitempty"` // CORS 允许的源
 	RateLimit   int      `yaml:"rate_limit,omitempty"`   // 每分钟请求限制，默认 60
 	MetricsAddr string   `yaml:"metrics_addr,omitempty"` // Prometheus metrics 独立端口（空=复用主端口）
@@ -43,9 +45,11 @@ func DefaultConfig() Config {
 
 // ErrorResponse 错误响应
 type ErrorResponse struct {
-	Error   string `json:"error"`
-	Code    int    `json:"code"`
-	Details string `json:"details,omitempty"`
+	Error     string `json:"error"`
+	Code      int    `json:"code"`
+	Details   string `json:"details,omitempty"`
+	ErrorCode string `json:"error_code,omitempty"`
+	RequestID string `json:"request_id,omitempty"`
 }
 
 type responseRecorder struct {
@@ -145,6 +149,7 @@ func (s *Middleware) CORS(next http.Handler) http.Handler {
 		}
 
 		origin := r.Header.Get("Origin")
+		w.Header().Add("Vary", "Origin")
 		allowed := false
 
 		if len(s.config.CORSOrigins) == 0 {
@@ -176,7 +181,7 @@ func (s *Middleware) CORS(next http.Handler) http.Handler {
 			if allowed {
 				w.WriteHeader(http.StatusNoContent)
 			} else {
-				w.WriteHeader(http.StatusForbidden)
+				SendError(w, "origin not allowed", http.StatusForbidden, "")
 			}
 			return
 		}
@@ -188,20 +193,15 @@ func (s *Middleware) CORS(next http.Handler) http.Handler {
 // authMiddleware API Key 认证中间件
 func (s *Middleware) Authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 健康检查不需要认证
-		if strings.HasPrefix(r.URL.Path, "/api/v1/health/") || r.URL.Path == "/" {
+		// Only the minimal probes and service index are public. Detailed health
+		// diagnostics require the same authentication as other resources.
+		if publicHealthRequest(r) || (r.URL.Path == "/" && (r.Method == http.MethodGet || r.Method == http.MethodHead)) {
 			next.ServeHTTP(w, r)
 			return
 		}
 
 		// 从 Header 获取 API Key（不再支持 query string，防止日志泄露）
-		apiKey := r.Header.Get("X-API-Key")
-		if apiKey == "" {
-			apiKey = r.Header.Get("Authorization")
-			if strings.HasPrefix(apiKey, "Bearer ") {
-				apiKey = strings.TrimPrefix(apiKey, "Bearer ")
-			}
-		}
+		apiKey := requestCredential(r)
 
 		// 无配置 API Key 则仅允许本地访问。扫码签发的临时 key 仍可从局域网进入。
 		if len(s.config.APIKeys) == 0 {
@@ -209,15 +209,14 @@ func (s *Middleware) Authenticate(next http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
-			ip := RemoteIP(r.RemoteAddr)
-			if ip != "127.0.0.1" && ip != "::1" && ip != "localhost" {
+			if !localRequestAllowed(r) {
 				logger.Warn("auth rejected non-local request without api keys",
 					"path", r.URL.Path,
 					"method", r.Method,
 					"remote_addr", r.RemoteAddr,
 				)
-				SendError(w, "api key required (no keys configured, localhost only)", http.StatusUnauthorized,
-					"configure api_keys in server config, scan lh qr, or access from localhost")
+				SendError(w, "api key required", http.StatusUnauthorized,
+					"configure server.api_keys, scan lh qr, or use a direct same-origin loopback connection")
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -260,20 +259,104 @@ func (s *Middleware) Authenticate(next http.Handler) http.Handler {
 // rateLimitMiddleware 限流中间件
 func (s *Middleware) RateLimit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := RemoteIP(r.RemoteAddr)
-		if !s.rateLimiter.Allow(ip) {
+		key := "local:" + RemoteIP(r.RemoteAddr)
+		if credential := requestCredential(r); credential != "" {
+			key = CredentialBucketKey(credential)
+		}
+		if publicHealthRequest(r) {
+			key = "health:" + RemoteIP(r.RemoteAddr)
+		}
+		if !s.rateLimiter.Allow(key) {
 			logger.Warn("rate limit exceeded",
 				"path", r.URL.Path,
 				"method", r.Method,
 				"remote_addr", r.RemoteAddr,
 				"limit_per_min", s.config.RateLimit,
 			)
+			w.Header().Set("Retry-After", "60")
 			SendError(w, "rate limit exceeded", http.StatusTooManyRequests,
 				fmt.Sprintf("limit: %d req/min", s.config.RateLimit))
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// CredentialBucketKey groups requests by credential without retaining the
+// credential itself in limiter maps. A shared key intentionally shares quota.
+func CredentialBucketKey(credential string) string {
+	return fmt.Sprintf("credential:%x", sha256.Sum256([]byte(credential)))
+}
+
+func requestCredential(r *http.Request) string {
+	if key := r.Header.Get("X-API-Key"); key != "" {
+		return key
+	}
+	key := r.Header.Get("Authorization")
+	if strings.HasPrefix(key, "Bearer ") {
+		return strings.TrimPrefix(key, "Bearer ")
+	}
+	return key
+}
+
+func publicHealthRequest(r *http.Request) bool {
+	return (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
+		(r.URL.Path == "/api/v1/health/live" || r.URL.Path == "/api/v1/health/ready")
+}
+
+func localRequestAllowed(r *http.Request) bool {
+	peer := net.ParseIP(RemoteIP(r.RemoteAddr))
+	if peer == nil || !peer.IsLoopback() || !loopbackHost(r.Host) {
+		return false
+	}
+	// A local proxy is not proof that its original caller is local. Never trust
+	// forwarding headers to grant the no-key exception.
+	for _, header := range []string{"Forwarded", "X-Forwarded-For", "X-Real-IP"} {
+		if _, present := r.Header[http.CanonicalHeaderKey(header)]; present {
+			return false
+		}
+	}
+	if raw := r.Header.Get("Origin"); raw != "" {
+		origin, err := url.Parse(raw)
+		if err != nil || origin.User != nil || origin.Path != "" || origin.RawQuery != "" || origin.Fragment != "" {
+			return false
+		}
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+		if origin.Scheme != scheme || !strings.EqualFold(originAuthority(origin.Host, scheme), originAuthority(r.Host, scheme)) {
+			return false
+		}
+	}
+	return true
+}
+
+func originAuthority(hostport, scheme string) string {
+	host, port, err := net.SplitHostPort(hostport)
+	if err != nil {
+		host = strings.Trim(hostport, "[]")
+	}
+	if port == "" {
+		port = "80"
+		if scheme == "https" {
+			port = "443"
+		}
+	}
+	return net.JoinHostPort(host, port)
+}
+
+func loopbackHost(hostport string) bool {
+	host := hostport
+	if parsed, _, err := net.SplitHostPort(hostport); err == nil {
+		host = parsed
+	}
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // RemoteIP strips the transport port from RemoteAddr and handles both
@@ -295,14 +378,7 @@ func (s *Middleware) Log(next http.Handler) http.Handler {
 
 		duration := time.Since(start)
 		clientIP := r.RemoteAddr
-		if xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); xff != "" {
-			parts := strings.Split(xff, ",")
-			if len(parts) > 0 && strings.TrimSpace(parts[0]) != "" {
-				clientIP = strings.TrimSpace(parts[0])
-			}
-		} else if xrip := strings.TrimSpace(r.Header.Get("X-Real-IP")); xrip != "" {
-			clientIP = xrip
-		} else if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 			clientIP = host
 		}
 
@@ -313,6 +389,7 @@ func (s *Middleware) Log(next http.Handler) http.Handler {
 			"duration_ms", duration.Milliseconds(),
 			"bytes", rec.bytes,
 			"client_ip", clientIP,
+			"request_id", rec.Header().Get("X-Request-ID"),
 		}
 		if ua := strings.TrimSpace(r.UserAgent()); ua != "" {
 			fields = append(fields, "user_agent", ua)
@@ -351,11 +428,12 @@ func (s *Middleware) Recover(next http.Handler) http.Handler {
 }
 
 type Limiter struct {
-	mu       sync.RWMutex
-	limit    int
-	clients  map[string]*clientBucket
-	stopCh   chan struct{}
-	stopOnce sync.Once
+	mu        sync.RWMutex
+	limit     int
+	clients   map[string]*clientBucket
+	stopCh    chan struct{}
+	stopOnce  sync.Once
+	nextPrune time.Time
 }
 
 type clientBucket struct {
@@ -364,6 +442,9 @@ type clientBucket struct {
 }
 
 func NewLimiter(limit int) *Limiter {
+	if limit <= 0 {
+		limit = DefaultConfig().RateLimit
+	}
 	rl := &Limiter{
 		limit:   limit,
 		clients: make(map[string]*clientBucket),
@@ -395,21 +476,34 @@ func (rl *Limiter) Stop() {
 }
 
 func (rl *Limiter) Allow(ip string) bool {
+	return rl.allowWithLimit(ip, rl.limit)
+}
+
+func (rl *Limiter) allowWithLimit(ip string, limit int) bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
 	now := time.Now()
+	rl.pruneLocked(now)
 	bucket, ok := rl.clients[ip]
 	if !ok || now.After(bucket.resetAt) {
+		// Bound unique peers/credentials, including on IPv6 listeners. Reject
+		// new identities at capacity instead of retaining unbounded state.
+		if !ok && len(rl.clients) >= 65536 {
+			return false
+		}
 		rl.clients[ip] = &clientBucket{
 			count:   1,
 			resetAt: now.Add(time.Minute),
 		}
-		return true
+		return limit > 0
 	}
 
+	if bucket.count >= limit {
+		return false
+	}
 	bucket.count++
-	return bucket.count <= rl.limit
+	return bucket.count <= limit
 }
 
 func (rl *Limiter) cleanup() {
@@ -434,6 +528,14 @@ type Middleware struct {
 
 // NewMiddleware accepts optional host-owned pairing and panic-accounting hooks.
 func NewMiddleware(config Config, limiter *Limiter, pairingKeyValid func(string) bool, onPanic func()) *Middleware {
+	if config.RateLimit <= 0 {
+		config.RateLimit = DefaultConfig().RateLimit
+	}
+	if limiter == nil {
+		// Optional embedders need a working policy too. This instance has no
+		// background goroutine; expired buckets are pruned opportunistically.
+		limiter = &Limiter{limit: config.RateLimit, clients: make(map[string]*clientBucket)}
+	}
 	if pairingKeyValid == nil {
 		pairingKeyValid = func(string) bool { return false }
 	}
@@ -446,7 +548,7 @@ func SendJSON(w http.ResponseWriter, status int, data any) {
 	_ = json.NewEncoder(w).Encode(data)
 }
 func SendError(w http.ResponseWriter, message string, code int, details string) {
-	SendJSON(w, code, ErrorResponse{Error: message, Code: code, Details: details})
+	SendJSON(w, code, ErrorResponse{Error: message, Code: code, Details: details, ErrorCode: statusErrorCode(code), RequestID: w.Header().Get("X-Request-ID")})
 }
 func DispatchMethod(w http.ResponseWriter, r *http.Request, handlers map[string]func()) bool {
 	handler, ok := handlers[r.Method]

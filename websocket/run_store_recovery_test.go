@@ -83,7 +83,7 @@ func TestRecoveryUsesCachedAndMemoryOnlyRuns(t *testing.T) {
 			t.Fatalf("cached recovery = %#v", runs)
 		}
 		runs[0].Attachments[0].FileName = "changed.png"
-		if store.sessions["s"].Runs[0].Attachments[0].FileName != "original.png" {
+		if store.sessions["s"].data.Runs[0].Attachments[0].FileName != "original.png" {
 			t.Fatal("attachments changed")
 		}
 	}
