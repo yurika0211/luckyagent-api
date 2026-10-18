@@ -9,13 +9,14 @@ import (
 	"strconv"
 	"time"
 
+	transport "github.com/yurika0211/luckyagent-api"
 	"github.com/yurika0211/luckyagent-tools/collab"
 )
 
 // HandleAgentsList 列出所有注册的 Agent
 func (s *Controller) HandleAgentsList(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		s.sendError(w, "method not allowed", http.StatusMethodNotAllowed, "")
 		return
 	}
 
@@ -42,19 +43,19 @@ func (s *Controller) HandleAgentsList(w http.ResponseWriter, r *http.Request) {
 // HandleAgentsGet 获取单个 Agent 信息
 func (s *Controller) HandleAgentsGet(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		s.sendError(w, "method not allowed", http.StatusMethodNotAllowed, "")
 		return
 	}
 
 	agentID := r.URL.Query().Get("id")
 	if agentID == "" {
-		http.Error(w, "missing agent id", http.StatusBadRequest)
+		s.sendError(w, "missing agent id", http.StatusBadRequest, "")
 		return
 	}
 
 	profile, ok := s.collabRegistry.Get(agentID)
 	if !ok {
-		http.Error(w, "agent not found", http.StatusNotFound)
+		s.sendError(w, "agent not found", http.StatusNotFound, "")
 		return
 	}
 
@@ -65,7 +66,7 @@ func (s *Controller) HandleAgentsGet(w http.ResponseWriter, r *http.Request) {
 // HandleAgentsRegister 注册新 Agent
 func (s *Controller) HandleAgentsRegister(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		s.sendError(w, "method not allowed", http.StatusMethodNotAllowed, "")
 		return
 	}
 
@@ -77,13 +78,13 @@ func (s *Controller) HandleAgentsRegister(w http.ResponseWriter, r *http.Request
 		Metadata     map[string]string `json:"metadata"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+	if err := transport.DecodeJSON(w, r, &req, transport.DefaultJSONBodyLimit); err != nil {
+		transport.SendRequestError(w, err)
 		return
 	}
 
 	if req.ID == "" {
-		http.Error(w, "agent id is required", http.StatusBadRequest)
+		s.sendError(w, "agent id is required", http.StatusBadRequest, "")
 		return
 	}
 
@@ -97,7 +98,7 @@ func (s *Controller) HandleAgentsRegister(w http.ResponseWriter, r *http.Request
 	}
 
 	if err := s.collabRegistry.Register(profile); err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
+		s.sendError(w, err.Error(), http.StatusConflict, "")
 		return
 	}
 
@@ -112,18 +113,18 @@ func (s *Controller) HandleAgentsRegister(w http.ResponseWriter, r *http.Request
 // HandleAgentsDeregister 注销 Agent
 func (s *Controller) HandleAgentsDeregister(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodDelete {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		s.sendError(w, "method not allowed", http.StatusMethodNotAllowed, "")
 		return
 	}
 
 	agentID := r.URL.Query().Get("id")
 	if agentID == "" {
-		http.Error(w, "missing agent id", http.StatusBadRequest)
+		s.sendError(w, "missing agent id", http.StatusBadRequest, "")
 		return
 	}
 
 	if err := s.collabRegistry.Deregister(agentID); err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		s.sendError(w, err.Error(), http.StatusNotFound, "")
 		return
 	}
 
@@ -137,7 +138,7 @@ func (s *Controller) HandleAgentsDeregister(w http.ResponseWriter, r *http.Reque
 // HandleAgentsDelegate 创建协作任务
 func (s *Controller) HandleAgentsDelegate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		s.sendError(w, "method not allowed", http.StatusMethodNotAllowed, "")
 		return
 	}
 
@@ -151,13 +152,13 @@ func (s *Controller) HandleAgentsDelegate(w http.ResponseWriter, r *http.Request
 		ParentSessionID string            `json:"parent_session_id,omitempty"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+	if err := transport.DecodeJSON(w, r, &req, transport.DefaultJSONBodyLimit); err != nil {
+		transport.SendRequestError(w, err)
 		return
 	}
 
 	if len(req.AgentIDs) == 0 {
-		http.Error(w, "at least one agent_id is required", http.StatusBadRequest)
+		s.sendError(w, "at least one agent_id is required", http.StatusBadRequest, "")
 		return
 	}
 
@@ -165,7 +166,7 @@ func (s *Controller) HandleAgentsDelegate(w http.ResponseWriter, r *http.Request
 		req.Timeout = 60 * time.Second
 	}
 	if req.CostBudget < 0 || req.CostBudget > 1 {
-		http.Error(w, "cost_budget must be between 0 and 1", http.StatusBadRequest)
+		s.sendError(w, "cost_budget must be between 0 and 1", http.StatusBadRequest, "")
 		return
 	}
 
@@ -176,10 +177,10 @@ func (s *Controller) HandleAgentsDelegate(w http.ResponseWriter, r *http.Request
 	task, err := s.delegateManager.DelegateWithSession(backgroundCtx, req.Mode, req.Description, req.Input, req.AgentIDs, req.Timeout, req.CostBudget, req.ParentSessionID)
 	if err != nil {
 		if errors.Is(err, collab.ErrInvalidMode) {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			s.sendError(w, err.Error(), http.StatusBadRequest, "")
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.sendError(w, err.Error(), http.StatusInternalServerError, "")
 		return
 	}
 	// The orchestrator has its own durable session too. Sub-task execution
@@ -201,19 +202,19 @@ func (s *Controller) HandleAgentsDelegate(w http.ResponseWriter, r *http.Request
 // HandleAgentsTask 获取任务状态
 func (s *Controller) HandleAgentsTask(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		s.sendError(w, "method not allowed", http.StatusMethodNotAllowed, "")
 		return
 	}
 
 	taskID := r.URL.Query().Get("id")
 	if taskID == "" {
-		http.Error(w, "missing task id", http.StatusBadRequest)
+		s.sendError(w, "missing task id", http.StatusBadRequest, "")
 		return
 	}
 
 	task, ok := s.delegateManager.GetTask(taskID)
 	if !ok {
-		http.Error(w, "task not found", http.StatusNotFound)
+		s.sendError(w, "task not found", http.StatusNotFound, "")
 		return
 	}
 
@@ -224,7 +225,7 @@ func (s *Controller) HandleAgentsTask(w http.ResponseWriter, r *http.Request) {
 // HandleAgentsTasks 列出所有任务
 func (s *Controller) HandleAgentsTasks(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		s.sendError(w, "method not allowed", http.StatusMethodNotAllowed, "")
 		return
 	}
 
@@ -245,18 +246,18 @@ func (s *Controller) HandleAgentsTasks(w http.ResponseWriter, r *http.Request) {
 // HandleAgentsCancel 取消任务
 func (s *Controller) HandleAgentsCancel(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		s.sendError(w, "method not allowed", http.StatusMethodNotAllowed, "")
 		return
 	}
 
 	taskID := r.URL.Query().Get("id")
 	if taskID == "" {
-		http.Error(w, "missing task id", http.StatusBadRequest)
+		s.sendError(w, "missing task id", http.StatusBadRequest, "")
 		return
 	}
 
 	if err := s.delegateManager.CancelTask(taskID); err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		s.sendError(w, err.Error(), http.StatusNotFound, "")
 		return
 	}
 
@@ -276,7 +277,7 @@ func (s *Controller) HandleAgentsBlackboard(w http.ResponseWriter, r *http.Reque
 		board = s.delegateManager.Blackboard()
 	}
 	if board == nil {
-		http.Error(w, "blackboard unavailable", http.StatusServiceUnavailable)
+		s.sendError(w, "blackboard unavailable", http.StatusServiceUnavailable, "")
 		return
 	}
 	switch r.Method {
@@ -294,13 +295,13 @@ func (s *Controller) HandleAgentsBlackboard(w http.ResponseWriter, r *http.Reque
 			Value  string `json:"value"`
 			Author string `json:"author"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid request body", http.StatusBadRequest)
+		if err := transport.DecodeJSON(w, r, &req, transport.DefaultJSONBodyLimit); err != nil {
+			transport.SendRequestError(w, err)
 			return
 		}
 		entry, err := board.Set(req.TaskID, req.Key, req.Value, req.Author)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			s.sendError(w, err.Error(), http.StatusBadRequest, "")
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -308,13 +309,13 @@ func (s *Controller) HandleAgentsBlackboard(w http.ResponseWriter, r *http.Reque
 		_ = json.NewEncoder(w).Encode(entry)
 	case http.MethodDelete:
 		if !board.Delete(r.URL.Query().Get("task_id"), r.URL.Query().Get("key")) {
-			http.Error(w, "blackboard entry not found", http.StatusNotFound)
+			s.sendError(w, "blackboard entry not found", http.StatusNotFound, "")
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		s.sendError(w, "method not allowed", http.StatusMethodNotAllowed, "")
 	}
 }
 
@@ -327,7 +328,7 @@ func (s *Controller) HandleAgentsMessages(w http.ResponseWriter, r *http.Request
 		bus = s.delegateManager.MessageBus()
 	}
 	if bus == nil {
-		http.Error(w, "message bus unavailable", http.StatusServiceUnavailable)
+		s.sendError(w, "message bus unavailable", http.StatusServiceUnavailable, "")
 		return
 	}
 	switch r.Method {
@@ -346,8 +347,8 @@ func (s *Controller) HandleAgentsMessages(w http.ResponseWriter, r *http.Request
 		}{Messages: messages, Count: len(messages)})
 	case http.MethodPost:
 		var message collab.Message
-		if err := json.NewDecoder(r.Body).Decode(&message); err != nil {
-			http.Error(w, "invalid request body", http.StatusBadRequest)
+		if err := transport.DecodeJSON(w, r, &message, transport.DefaultJSONBodyLimit); err != nil {
+			transport.SendRequestError(w, err)
 			return
 		}
 		if message.ID == "" {
@@ -357,13 +358,13 @@ func (s *Controller) HandleAgentsMessages(w http.ResponseWriter, r *http.Request
 			message.Timestamp = time.Now()
 		}
 		if err := bus.Publish(&message); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			s.sendError(w, err.Error(), http.StatusBadRequest, "")
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(message)
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		s.sendError(w, "method not allowed", http.StatusMethodNotAllowed, "")
 	}
 }

@@ -47,7 +47,7 @@ func main() {
     mux.HandleFunc("/api/v1/health/live", func(w http.ResponseWriter, r *http.Request) {
         transport.SendJSON(w, http.StatusOK, map[string]string{"status": "ok"})
     })
-    handler := policy.Log(policy.Authenticate(policy.RateLimit(policy.Recover(mux))))
+    handler := policy.Log(policy.Protect(mux))
     if err := transport.NewHTTPServer(cfg.Addr, handler).ListenAndServe(); err != nil {
         panic(err)
     }
@@ -65,6 +65,12 @@ provisioning. `NewHTTPServer` does not start a goroutine: the host owns listenin
 resource cleanup and graceful shutdown.
 
 ## Compatibility and tests
+
+Use `Middleware.Protect` for the complete admission, authentication, credential
+quota and request-body policy. Logging and optional CORS wrap that handler.
+The lower-level middleware methods remain available for existing embedders.
+See [HTTP and realtime reliability](docs/reliability.md) for local authentication,
+body limits, atomic request acceptance, event replay and journal compatibility.
 
 `workflow.NewServerHandlers` accepts a `luckyagent-tools/workflow.WorkflowEngine`
 whose executor is configured by the host. `RegisterRoutes` preserves the
