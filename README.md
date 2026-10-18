@@ -23,6 +23,9 @@ The root package is named `transport` and provides:
 - `workflow`: optional Gin handlers over the public tool-module DAG engine;
   the DAG implementation does not depend on Gin or the API module.
 
+See [WebSocket run recovery](docs/websocket-recovery.md) for startup scanning,
+lazy event loading and recovery compatibility.
+
 It never imports the LuckyAgent runtime. The `luckyagent-gateway/turn` package
 supplies shared neutral event/usage DTOs; importing it does not compile every
 platform adapter.
