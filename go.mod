@@ -6,6 +6,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0
 	github.com/yurika0211/luckyagent-gateway v0.2.1
+	github.com/yurika0211/luckyagent-orchestrator v0.1.1-0.20261018033818-5198cd311287
 	google.golang.org/genproto/googleapis/api v0.0.0-20260414002931-afd174a4e478
 	google.golang.org/grpc v1.80.0
 	google.golang.org/protobuf v1.36.11
@@ -52,5 +53,5 @@ require (
 require (
 	github.com/gin-gonic/gin v1.12.0
 	github.com/stretchr/testify v1.11.1
-	github.com/yurika0211/luckyagent-tools v0.2.3-0.20261017170624-31ef6846a434
+	github.com/yurika0211/luckyagent-tools v0.2.3-0.20261018015813-7b1ba2f8fba9
 )

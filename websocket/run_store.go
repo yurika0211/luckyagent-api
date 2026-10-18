@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -398,30 +399,84 @@ func (s *RunStore) ActiveRuns(sessionID string) []RunRecord {
 }
 
 func (s *RunStore) Restoreable() []RunRecord {
-	for _, sessionID := range s.discoverSessions() {
-		s.session(sessionID)
-	}
 	s.mu.Lock()
-	entries := make([]*runSession, 0, len(s.sessions))
-	for _, entry := range s.sessions {
-		entries = append(entries, entry)
+	entries := make(map[string]*runSession, len(s.sessions))
+	for id, entry := range s.sessions {
+		entries[id] = entry
 	}
 	s.mu.Unlock()
+	// Cached state remains authoritative. Disk-only recovery scans metadata
+	// without creating runSession entries or retaining completed event histories.
+	cached := make(map[string]bool, len(entries))
 	var result []RunRecord
-	for _, entry := range entries {
+	for id, entry := range entries {
 		entry.mu.Lock()
-		if s.loadLocked(entry) == nil {
-			s.pruneDueLocked(entry)
-			for _, run := range entry.data.Runs {
-				if run != nil && isActive(run.State) {
-					result = append(result, cloneRun(*run))
-				}
+		if entry.loaded {
+			cached[id] = true
+			if entry.loadErr == nil {
+				result = append(result, restoreableRunRecords(id, entry.data.Runs)...)
 			}
 		}
 		entry.mu.Unlock()
 	}
+	result = append(result, s.scanRestoreableDiskRuns(cached)...)
 	sort.SliceStable(result, func(i, j int) bool { return result[i].CreatedAt.Before(result[j].CreatedAt) })
 	return result
+}
+
+func restoreableRunRecords(sessionID string, runs []*RunRecord) []RunRecord {
+	var active []RunRecord
+	for _, run := range runs {
+		if run == nil || (run.State != "queued" && run.State != "running") {
+			continue
+		}
+		copyRun := cloneRun(*run)
+		if strings.TrimSpace(copyRun.SessionID) == "" {
+			copyRun.SessionID = sessionID
+		}
+		active = append(active, copyRun)
+	}
+	return active
+}
+
+// scanActiveRunsFromFile reads recovery metadata without decoding events. The
+// writer places session_id and runs before events; older field orders still
+// work, but require streaming past intervening values. Event replay remains a
+// separate, lazy read through loadLocked.
+func scanActiveRunsFromFile(path string) (string, []RunRecord, error) {
+	metadata, err := scanRunSnapshot(path)
+	return metadata.sessionID, restoreableRunRecords(metadata.sessionID, metadata.runs), err
+}
+
+func skipJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := token.(json.Delim)
+	if !ok {
+		return nil
+	}
+	if delim != '{' && delim != '[' {
+		return fmt.Errorf("unexpected JSON delimiter %q", delim)
+	}
+	for decoder.More() {
+		if delim == '{' {
+			if _, err := decoder.Token(); err != nil {
+				return err
+			}
+		}
+		if err := skipJSONValue(decoder); err != nil {
+			return err
+		}
+	}
+	_, err = decoder.Token()
+	return err
+}
+
+func isWebsocketSessionFile(path string) bool {
+	name := filepath.Base(path)
+	return !strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".json") && !strings.Contains(name, ".tmp.")
 }
 
 func stableSessionHash(sessionID string) uint64 {

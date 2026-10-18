@@ -4,11 +4,11 @@ package resources
 import (
 	"context"
 	transport "github.com/yurika0211/luckyagent-api"
+	"github.com/yurika0211/luckyagent-orchestrator/autonomy"
+	"github.com/yurika0211/luckyagent-orchestrator/collab"
+	"github.com/yurika0211/luckyagent-orchestrator/task"
 	tool "github.com/yurika0211/luckyagent-tools"
-	"github.com/yurika0211/luckyagent-tools/autonomy"
-	"github.com/yurika0211/luckyagent-tools/collab"
 	"github.com/yurika0211/luckyagent-tools/cron"
-	"github.com/yurika0211/luckyagent-tools/task"
 	"net/http"
 )
 

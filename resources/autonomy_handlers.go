@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yurika0211/luckyagent-tools/autonomy"
+	"github.com/yurika0211/luckyagent-orchestrator/autonomy"
 )
 
 type AutonomyDashboardResponse struct {

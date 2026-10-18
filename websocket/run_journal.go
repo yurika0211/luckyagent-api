@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 )
 
@@ -251,48 +250,4 @@ func replaceRunFile(path string, raw []byte) error {
 		return err
 	}
 	return syncDirectory(filepath.Dir(path))
-}
-
-func (s *RunStore) discoverSessions() []string {
-	if s.root == "" {
-		return nil
-	}
-	files, err := os.ReadDir(s.root)
-	if err != nil {
-		return nil
-	}
-	seen := make(map[string]bool)
-	for _, entry := range files {
-		if entry.IsDir() {
-			continue
-		}
-		path := filepath.Join(s.root, entry.Name())
-		var raw []byte
-		if strings.HasSuffix(entry.Name(), ".json") {
-			raw, err = os.ReadFile(path)
-		} else if strings.HasSuffix(entry.Name(), ".jsonl") {
-			file, openErr := os.Open(path)
-			if openErr != nil {
-				continue
-			}
-			raw, err = bufio.NewReader(file).ReadBytes('\n')
-			_ = file.Close()
-		} else {
-			continue
-		}
-		if err != nil {
-			continue
-		}
-		var header struct {
-			SessionID string `json:"session_id"`
-		}
-		if json.Unmarshal(raw, &header) == nil && header.SessionID != "" {
-			seen[header.SessionID] = true
-		}
-	}
-	result := make([]string, 0, len(seen))
-	for sessionID := range seen {
-		result = append(result, sessionID)
-	}
-	return result
 }
