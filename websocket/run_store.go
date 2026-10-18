@@ -279,29 +279,132 @@ func (s *RunStore) ActiveRuns(sessionID string) []RunRecord {
 func (s *RunStore) Restoreable() []RunRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.root != "" {
-		if paths, err := filepath.Glob(filepath.Join(s.root, "*.json")); err == nil {
-			for _, path := range paths {
-				raw, err := os.ReadFile(path)
-				if err != nil {
-					continue
-				}
-				var loaded persistedSession
-				if json.Unmarshal(raw, &loaded) == nil && loaded.SessionID != "" {
-					s.sessions[loaded.SessionID] = &loaded
-				}
-			}
-		}
-	}
+
+	// Cached sessions are authoritative, including stores without a disk root.
+	// Startup scanning must not turn completed event histories into resident data.
 	var result []RunRecord
-	for _, session := range s.sessions {
-		for _, run := range session.Runs {
-			if run != nil && (run.State == "queued" || run.State == "running") {
-				result = append(result, *run)
-			}
+	loadedFiles := make(map[string]bool, len(s.sessions))
+	for id, session := range s.sessions {
+		result = append(result, restoreableRunRecords(id, session.Runs)...)
+		loadedFiles[fmt.Sprintf("%x.json", stableSessionHash(id))] = true
+	}
+	if s.root == "" {
+		return result
+	}
+	paths, err := filepath.Glob(filepath.Join(s.root, "*.json"))
+	if err != nil {
+		return result
+	}
+	for _, path := range paths {
+		if !isWebsocketSessionFile(path) || loadedFiles[filepath.Base(path)] {
+			continue
 		}
+		id, runs, err := scanActiveRunsFromFile(path)
+		if err != nil || id == "" || s.sessions[id] != nil {
+			continue
+		}
+		result = append(result, runs...)
 	}
 	return result
+}
+
+func restoreableRunRecords(sessionID string, runs []*RunRecord) []RunRecord {
+	var active []RunRecord
+	for _, run := range runs {
+		if run == nil || (run.State != "queued" && run.State != "running") {
+			continue
+		}
+		copyRun := *run
+		if strings.TrimSpace(copyRun.SessionID) == "" {
+			copyRun.SessionID = sessionID
+		}
+		copyRun.Attachments = append([]gateway.Attachment(nil), run.Attachments...)
+		active = append(active, copyRun)
+	}
+	return active
+}
+
+// scanActiveRunsFromFile reads recovery metadata without decoding events. The
+// writer places session_id and runs before events; older field orders still
+// work, but require streaming past intervening values. Event replay remains a
+// separate, lazy read through sessionLocked.
+func scanActiveRunsFromFile(path string) (string, []RunRecord, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", nil, err
+	}
+	defer file.Close()
+	decoder := json.NewDecoder(file)
+	token, err := decoder.Token()
+	if err != nil {
+		return "", nil, err
+	}
+	if token != json.Delim('{') {
+		return "", nil, fmt.Errorf("websocket session %s: expected object", filepath.Base(path))
+	}
+	var sessionID string
+	var runs []*RunRecord
+	haveRuns := false
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return "", nil, err
+		}
+		switch token {
+		case "session_id":
+			if err := decoder.Decode(&sessionID); err != nil {
+				return "", nil, err
+			}
+		case "runs":
+			if err := decoder.Decode(&runs); err != nil {
+				return "", nil, err
+			}
+			haveRuns = true
+		default:
+			if err := skipJSONValue(decoder); err != nil {
+				return "", nil, err
+			}
+		}
+		sessionID = strings.TrimSpace(sessionID)
+		if sessionID != "" && haveRuns {
+			return sessionID, restoreableRunRecords(sessionID, runs), nil
+		}
+	}
+	if _, err := decoder.Token(); err != nil {
+		return "", nil, err
+	}
+	return sessionID, restoreableRunRecords(sessionID, runs), nil
+}
+
+func skipJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := token.(json.Delim)
+	if !ok {
+		return nil
+	}
+	if delim != '{' && delim != '[' {
+		return fmt.Errorf("unexpected JSON delimiter %q", delim)
+	}
+	for decoder.More() {
+		if delim == '{' {
+			if _, err := decoder.Token(); err != nil {
+				return err
+			}
+		}
+		if err := skipJSONValue(decoder); err != nil {
+			return err
+		}
+	}
+	_, err = decoder.Token()
+	return err
+}
+
+func isWebsocketSessionFile(path string) bool {
+	name := filepath.Base(path)
+	return !strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".json") && !strings.Contains(name, ".tmp.")
 }
 
 func stableSessionHash(sessionID string) uint64 {
