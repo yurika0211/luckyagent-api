@@ -6,8 +6,9 @@ it. Do not also apply the individual authentication and rate middleware.
 
 ## Authentication and quotas
 
-Only GET `/api/v1/health/live` and `/api/v1/health/ready` are public. Health detail
-and the root summary use the ordinary authentication policy. Fixed keys use
+The minimal `/api/v1/health/live` and `/api/v1/health/ready` probes and the root
+service index are public for GET/HEAD. Health detail uses the ordinary
+authentication policy. Fixed keys use
 `X-API-Key` or `Authorization: Bearer`; query keys remain unsupported. A host
 can inject validation for its temporary pairing keys.
 
