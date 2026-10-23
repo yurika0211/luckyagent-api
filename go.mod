@@ -5,8 +5,8 @@ go 1.25.0
 require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0
-	github.com/yurika0211/luckyagent-gateway v0.2.1
-	github.com/yurika0211/luckyagent-orchestrator v0.1.1-0.20261018033818-5198cd311287
+	github.com/yurika0211/luckyagent-gateway v0.2.2
+	github.com/yurika0211/luckyagent-orchestrator v0.1.1-0.20261019181659-18ef78990cea
 	google.golang.org/genproto/googleapis/api v0.0.0-20260414002931-afd174a4e478
 	google.golang.org/grpc v1.80.0
 	google.golang.org/protobuf v1.36.11
@@ -26,6 +26,7 @@ require (
 	github.com/goccy/go-json v0.10.5 // indirect
 	github.com/goccy/go-yaml v1.19.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/jezek/xgb v1.3.1 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
@@ -53,5 +54,5 @@ require (
 require (
 	github.com/gin-gonic/gin v1.12.0
 	github.com/stretchr/testify v1.11.1
-	github.com/yurika0211/luckyagent-tools v0.2.3-0.20261018015813-7b1ba2f8fba9
+	github.com/yurika0211/luckyagent-tools v0.2.3-0.20261023111321-671074442ead
 )
