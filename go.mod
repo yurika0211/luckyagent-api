@@ -54,5 +54,5 @@ require (
 require (
 	github.com/gin-gonic/gin v1.12.0
 	github.com/stretchr/testify v1.11.1
-	github.com/yurika0211/luckyagent-tools v0.2.3-0.20261023111321-671074442ead
+	github.com/yurika0211/luckyagent-tools v0.2.3
 )
