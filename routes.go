@@ -24,6 +24,7 @@ type Handlers struct {
 	Artifact             http.HandlerFunc
 	Commands             http.HandlerFunc
 	Cron                 http.HandlerFunc
+	CronByID             http.HandlerFunc
 	Tasks                http.HandlerFunc
 	TaskByID             http.HandlerFunc
 	AutonomyDashboard    http.HandlerFunc
@@ -105,6 +106,7 @@ func RegisterRoutes(mux *http.ServeMux, h Handlers) {
 	mux.HandleFunc("/api/v1/artifacts", h.Artifact)
 	mux.HandleFunc("/api/v1/commands", h.Commands)
 	mux.HandleFunc("/api/v1/cron", h.Cron)
+	mux.HandleFunc("/api/v1/cron/", h.CronByID)
 	mux.HandleFunc("/api/v1/tasks", h.Tasks)
 	mux.HandleFunc("/api/v1/tasks/", h.TaskByID)
 	mux.HandleFunc("/api/v1/autonomy/dashboard", h.AutonomyDashboard)

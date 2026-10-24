@@ -21,7 +21,25 @@ type ApprovalBackend interface {
 	PendingApprovals() []tool.PendingApproval
 	RespondApprovalWithInput(context.Context, string, string, string, string) (tool.PendingApproval, error)
 }
-type CronBackend interface{ CronEngine() *cron.Engine }
+
+// CronBackend reads the scheduler and, when the host supplies the optional
+// writer, creates and mutates jobs. Writers must reuse the host task builder
+// and persistence path. A read-only engine still serves GET.
+type CronBackend interface {
+	CronEngine() *cron.Engine
+}
+
+// CronJobWriter is the host port for HTTP cron mutations. luckyagent-api does
+// not import the Agent module; the embedding app implements this by calling
+// Agent.AddCronJob, PauseCronJob, ResumeCronJob and RemoveCronJob.
+// AddCronJob returns the stored job after persistence. Engine.GetJob copies
+// the job, so a flag set on the stored pointer would otherwise be invisible.
+type CronJobWriter interface {
+	AddCronJob(id, name, description, mode, command string, metadata map[string]string, schedule cron.Schedule) (*cron.Job, error)
+	PauseCronJob(id string) error
+	ResumeCronJob(id string) error
+	RemoveCronJob(id string) error
+}
 type AutonomyBackend interface{ Autonomy() *autonomy.AutonomyKit }
 type SkillBackend interface {
 	SkillRegistry() *tool.SkillRegistry

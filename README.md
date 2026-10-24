@@ -18,6 +18,9 @@ The root package is named `transport` and provides:
   management, durable run storage and reconnect replay. The host executes runs.
 - `resources`: task/tree/feedback, approvals, cron, autonomy, Skill installation
   and collaboration controllers, using injected public orchestration/tool ports.
+  Cron list stays `GET /api/v1/cron`. Create is `POST /api/v1/cron`; pause,
+  resume, get and delete use `/api/v1/cron/{id}`. Writes call the host
+  `CronJobWriter` port so this module never builds the runnable task itself.
 - `health`: health check registration and reports.
 - `grpc`: protobuf messages, client, service contract and gateway registration.
 - `workflow`: optional Gin handlers over the public tool-module DAG engine;
