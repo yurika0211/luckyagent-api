@@ -286,7 +286,7 @@ func cronJobJSON(job *cron.Job) cronJobResponse {
 		ID:             job.ID,
 		Name:           job.Name,
 		Description:    job.Description,
-		Schedule:       cron.DescribeSchedule(job.Schedule),
+		Schedule:       cronScheduleText(job),
 		Expression:     cronExpression(job),
 		Status:         job.Status.String(),
 		LastRun:        formatCronTime(job.LastRun),
@@ -365,6 +365,23 @@ func newCronJobID(mode, command string, now time.Time) string {
 		id = strings.Trim(id[:48], "-")
 	}
 	return fmt.Sprintf("%s-%d", id, now.Unix())
+}
+
+// cronScheduleText keeps the human text Android already renders. A daily job
+// is stored as schedule_text "每天9点" plus a cron expression. After restart the
+// engine reloads that expression, so DescribeSchedule would change from
+// "每天09:00" to "0 9 * * *". Prefer the natural-language text when it parses.
+func cronScheduleText(job *cron.Job) string {
+	if job == nil {
+		return ""
+	}
+	text := strings.TrimSpace(job.Metadata["schedule_text"])
+	if text != "" {
+		if schedule, err := cron.ParseNaturalLanguage(text); err == nil {
+			return cron.DescribeSchedule(schedule)
+		}
+	}
+	return cron.DescribeSchedule(job.Schedule)
 }
 
 // cronExpression returns the caller's original 5-field expression when the

@@ -279,6 +279,30 @@ func TestCronMissingJobAndCronExpression(t *testing.T) {
 	}
 }
 
+func TestCronScheduleTextSurvivesExpressionReload(t *testing.T) {
+	controller, backend := newCronController(t)
+	parsed, err := cron.ParseCronExpr("0 9 * * *")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.engine.AddJobWithMeta("morning", "Cron: morning", "汇总昨日", parsed, func() error { return nil }, map[string]string{
+		"schedule_text": "每天9点",
+		"command":       "汇总昨日",
+		"mode":          "agent",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	controller.HandleCronByID(w, httptest.NewRequest(http.MethodGet, "/api/v1/cron/morning", nil))
+	var job cronJobResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &job); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != http.StatusOK || job.Schedule != "每天09:00" || job.Expression != "0 9 * * *" {
+		t.Fatalf("reloaded schedule=%+v body=%s", job, w.Body.String())
+	}
+}
+
 func TestCronCreateRequiresSessionDeliveryMetadata(t *testing.T) {
 	controller, backend := newCronController(t)
 	body := `{"schedule":"每天9点","command":"echo hi","metadata":{"platform":"android"}}`

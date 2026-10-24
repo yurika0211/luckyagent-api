@@ -47,7 +47,12 @@ PATCH body is `{"action":"pause"}` or `{"action":"resume"}`.
 {"id":"","name":"","description":"","schedule":"每天09:00","expression":"0 9 * * *","status":"idle","last_run":null,"next_run":"","run_count":0,"error_count":0,"last_error":"","created_at":"","updated_at":"","delete_after_run":false,"metadata":{}}
 ```
 
-`schedule` stays `cron.DescribeSchedule`. For a parsed 5-field expression that
+`schedule` stays the human text from `cron.DescribeSchedule`. If metadata
+`schedule_text` parses as natural language, that parsed description is used.
+This keeps `每天9点` as `每天09:00` after restart. The store reloads the
+persisted cron expression, and describing that expression directly would show
+`0 9 * * *`. A request that is already a 5-field expression is unchanged:
+a step such as `*/15 * * * *` still displays as the expanded field list.
 uses a step, that human field is the expanded field list, for example
 `*/15 * * * *` displays as `0,15,30,45 * * * *`. That display is unchanged.
 
