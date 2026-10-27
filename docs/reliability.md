@@ -27,6 +27,10 @@ quota. Rejections include `Retry-After: 60`.
 
 ## Requests and errors
 
+`/api/v1/chat/complete` is the host's sessionless generation route. This module
+only registers the path; the host owns the model call and must not create or
+append a session for it.
+
 JSON bodies default to 2 MiB. Upload and Skill multipart endpoints retain their
 separate handler limits, with a 64 MiB transport ceiling. The transport checks
 the full body before invoking an operation, including unknown-length requests.

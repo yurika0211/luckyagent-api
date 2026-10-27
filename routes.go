@@ -18,6 +18,7 @@ type Handlers struct {
 	Approvals            http.HandlerFunc
 	Chat                 http.HandlerFunc
 	ChatSync             http.HandlerFunc
+	ChatComplete         http.HandlerFunc
 	Sessions             http.HandlerFunc
 	SessionByID          http.HandlerFunc
 	Uploads              http.HandlerFunc
@@ -100,6 +101,7 @@ func RegisterRoutes(mux *http.ServeMux, h Handlers) {
 	mux.HandleFunc("/api/v1/approvals/resolve", h.Approvals)
 	mux.HandleFunc("/api/v1/chat", h.Chat)
 	mux.HandleFunc("/api/v1/chat/sync", h.ChatSync)
+	mux.HandleFunc("/api/v1/chat/complete", h.ChatComplete)
 	mux.HandleFunc("/api/v1/sessions", h.Sessions)
 	mux.HandleFunc("/api/v1/sessions/", h.SessionByID)
 	mux.HandleFunc("/api/v1/uploads", h.Uploads)
