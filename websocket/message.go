@@ -35,6 +35,8 @@ const (
 	TypeTaskEvent   MessageType = "task_event"   // 子代理和后台任务进度
 	TypeError       MessageType = "error"        // 错误消息
 	TypePong        MessageType = "pong"         // 心跳 pong
+	TypeUIDelta     MessageType = "ui_delta"     // OpenUI tree patch
+	TypeUIAction    MessageType = "ui_action"    // client widget intent
 )
 
 // Message WebSocket 消息协议
@@ -91,6 +93,30 @@ type ApprovalRequestData struct {
 }
 
 // StreamChunkData 流式输出块数据
+// UIDeltaData is a catalog-validated OpenUI patch. It does not replace
+// StreamChunkData; both may appear on the same assistant turn.
+type UIDeltaData struct {
+	TreeID string       `json:"tree_id"`
+	State  string       `json:"state"`
+	Nodes  []UINodeData `json:"nodes,omitempty"`
+	Patch  bool         `json:"patch,omitempty"`
+}
+
+type UINodeData struct {
+	ID       string         `json:"id"`
+	Type     string         `json:"type"`
+	Policy   string         `json:"policy,omitempty"`
+	Props    map[string]any `json:"props,omitempty"`
+	Children []string       `json:"children,omitempty"`
+}
+
+// UIActionData is a client intent against one widget. It is not tool execution.
+type UIActionData struct {
+	TreeID   string         `json:"tree_id"`
+	WidgetID string         `json:"widget_id"`
+	Values   map[string]any `json:"values,omitempty"`
+}
+
 type StreamChunkData struct {
 	Content string `json:"content"`
 	Done    bool   `json:"done"`
