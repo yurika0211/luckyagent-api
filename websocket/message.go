@@ -163,6 +163,9 @@ type ToolResultData struct {
 	StepID      string               `json:"step_id,omitempty"`
 	Visibility  string               `json:"visibility,omitempty"` // "visible" | "compact" | "hidden"
 	Attachments []gateway.Attachment `json:"attachments,omitempty"`
+	// DurationMS is the finished tool call's wall-clock time. Zero means the
+	// producer did not measure it; older events omit the field.
+	DurationMS int64 `json:"duration_ms,omitempty"`
 }
 
 // CompactData is session context compaction progress for client UI.
