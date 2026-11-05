@@ -30,6 +30,7 @@ type Handlers struct {
 	TaskByID             http.HandlerFunc
 	AutonomyDashboard    http.HandlerFunc
 	AutonomyTaskByID     http.HandlerFunc
+	ForegroundTasks      http.HandlerFunc
 	Memory               http.HandlerFunc
 	MemoryRecall         http.HandlerFunc
 	MemoryRecallTrace    http.HandlerFunc
@@ -113,6 +114,9 @@ func RegisterRoutes(mux *http.ServeMux, h Handlers) {
 	mux.HandleFunc("/api/v1/tasks/", h.TaskByID)
 	mux.HandleFunc("/api/v1/autonomy/dashboard", h.AutonomyDashboard)
 	mux.HandleFunc("/api/v1/autonomy/tasks/", h.AutonomyTaskByID)
+	if h.ForegroundTasks != nil {
+		mux.HandleFunc("/api/v1/foreground/tasks", h.ForegroundTasks)
+	}
 	mux.HandleFunc("/api/v1/memory", h.Memory)
 	mux.HandleFunc("/api/v1/memory/recall", h.MemoryRecall)
 	mux.HandleFunc("/api/v1/memory/recall/trace", h.MemoryRecallTrace)
