@@ -57,12 +57,16 @@ type HealthReport struct {
 
 // SystemInfo 系统信息
 type SystemInfo struct {
-	GoVersion    string  `json:"go_version"`
-	NumGoroutine int     `json:"num_goroutine"`
-	NumCPU       int     `json:"num_cpu"`
-	HeapAllocMB  float64 `json:"heap_alloc_mb"`
-	HeapSysMB    float64 `json:"heap_sys_mb"`
-	StackInUseMB float64 `json:"stack_in_use_mb"`
+	GoVersion          string   `json:"go_version"`
+	NumGoroutine       int      `json:"num_goroutine"`
+	NumCPU             int      `json:"num_cpu"`
+	HeapAllocMB        float64  `json:"heap_alloc_mb"`
+	HeapSysMB          float64  `json:"heap_sys_mb"`
+	StackInUseMB       float64  `json:"stack_in_use_mb"`
+	ProcessRSSBytes    *int64   `json:"process_rss_bytes,omitempty"`
+	LuckyAgentDirBytes *int64   `json:"luckyagent_dir_bytes,omitempty"`
+	ProcessCPUPercent  *float64 `json:"process_cpu_percent,omitempty"`
+	ProcessCPUSampleMS *int64   `json:"process_cpu_sample_ms,omitempty"`
 }
 
 // NewHealthCheck 创建健康检查器
@@ -141,14 +145,27 @@ func getSystemInfo() SystemInfo {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 
-	return SystemInfo{
-		GoVersion:    runtime.Version(),
-		NumGoroutine: runtime.NumGoroutine(),
-		NumCPU:       runtime.NumCPU(),
-		HeapAllocMB:  float64(m.HeapAlloc) / 1024 / 1024,
-		HeapSysMB:    float64(m.HeapSys) / 1024 / 1024,
-		StackInUseMB: float64(m.StackInuse) / 1024 / 1024,
+	info := SystemInfo{
+		GoVersion:          runtime.Version(),
+		NumGoroutine:       runtime.NumGoroutine(),
+		NumCPU:             runtime.NumCPU(),
+		HeapAllocMB:        float64(m.HeapAlloc) / 1024 / 1024,
+		HeapSysMB:          float64(m.HeapSys) / 1024 / 1024,
+		StackInUseMB:       float64(m.StackInuse) / 1024 / 1024,
+		ProcessRSSBytes:    processRSSBytes(),
+		LuckyAgentDirBytes: systemDirCache.bytes(),
 	}
+	fillProcessCPU(&info)
+	return info
+}
+
+func fillProcessCPU(info *SystemInfo) {
+	if info == nil {
+		return
+	}
+	percent, sampleMS := systemCPUSampler.sample()
+	info.ProcessCPUPercent = percent
+	info.ProcessCPUSampleMS = sampleMS
 }
 
 // FormatUptime 格式化运行时间
