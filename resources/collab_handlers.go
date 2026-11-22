@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	transport "github.com/yurika0211/luckyagent-api"
@@ -159,6 +160,10 @@ func (s *Controller) HandleAgentsDelegate(w http.ResponseWriter, r *http.Request
 
 	if len(req.AgentIDs) == 0 {
 		s.sendError(w, "at least one agent_id is required", http.StatusBadRequest, "")
+		return
+	}
+	if strings.TrimSpace(req.ParentSessionID) == "" {
+		s.sendError(w, "parent_session_id is required", http.StatusBadRequest, "")
 		return
 	}
 

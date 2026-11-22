@@ -140,6 +140,19 @@ func (s *Controller) HandleTaskByID(w http.ResponseWriter, r *http.Request) {
 			s.sendError(w, "method not allowed", http.StatusMethodNotAllowed, "")
 			return
 		}
+		record, ok, err := store.Get(taskID)
+		if err != nil {
+			s.sendError(w, "get task failed", http.StatusInternalServerError, err.Error())
+			return
+		}
+		if !ok {
+			s.sendError(w, "task not found", http.StatusNotFound, taskID)
+			return
+		}
+		if record.Status != taskstore.StatusCompleted {
+			s.sendError(w, fmt.Sprintf("task result is not ready; status=%s", record.Status), http.StatusConflict, "")
+			return
+		}
 		result, ok, err := store.Result(taskID)
 		if err != nil {
 			s.sendError(w, "get task result failed", http.StatusInternalServerError, err.Error())
