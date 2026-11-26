@@ -56,6 +56,10 @@ func (s *Controller) HandleCron(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Controller) HandleCronByID(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(strings.TrimPrefix(r.URL.Path, "/api/v1/cron/"), "results/") {
+		s.HandleCronResults(w, r)
+		return
+	}
 	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/cron/"), "/"), "/")
 	if len(parts) == 0 || strings.TrimSpace(parts[0]) == "" {
 		s.sendError(w, "job id is required", http.StatusBadRequest, "")

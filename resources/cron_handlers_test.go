@@ -97,6 +97,47 @@ type cronReadRuntime struct {
 	engine *cron.Engine
 }
 
+type cronResultRuntime struct {
+	Runtime
+	engine *cron.Engine
+	store  *cron.ResultStore
+}
+
+func (r *cronResultRuntime) CronEngine() *cron.Engine       { return r.engine }
+func (r *cronResultRuntime) CronResults() *cron.ResultStore { return r.store }
+
+func TestCronResultContractRegistersPollsAndAcks(t *testing.T) {
+	store := cron.NewMemoryResultStore()
+	if _, err := store.EnsureTask(cron.Task{ID: "task-1", Name: "日报", Channels: []string{"android"}}); err != nil {
+		t.Fatal(err)
+	}
+	scheduled := time.Now().UTC().Add(time.Hour)
+	execution, claimed, err := store.Claim("task-1", scheduled, time.Now().UTC())
+	if err != nil || !claimed {
+		t.Fatalf("claim=%#v %t %v", execution, claimed, err)
+	}
+	if _, err := store.Complete(execution.ID, "result", nil, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	controller := New(Options{Runtime: &cronResultRuntime{engine: cron.NewEngine(), store: store}})
+	w := httptest.NewRecorder()
+	controller.HandleCronByID(w, httptest.NewRequest(http.MethodPost, "/api/v1/cron/results/devices", strings.NewReader(`{"id":"phone","channel":"android","notifications_enabled":true,"channel_enabled":true}`)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("register=%d %s", w.Code, w.Body.String())
+	}
+	w = httptest.NewRecorder()
+	controller.HandleCronByID(w, httptest.NewRequest(http.MethodGet, "/api/v1/cron/results/pending?device_id=phone", nil))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"result":"result"`) {
+		t.Fatalf("pending=%d %s", w.Code, w.Body.String())
+	}
+	delivery := store.ListDeliveries(execution.ID)[0]
+	w = httptest.NewRecorder()
+	controller.HandleCronByID(w, httptest.NewRequest(http.MethodPost, "/api/v1/cron/results/deliveries/"+delivery.ID+"/ack", strings.NewReader(`{"device_id":"phone"}`)))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"delivered"`) {
+		t.Fatalf("ack=%d %s", w.Code, w.Body.String())
+	}
+}
+
 func (r *cronReadRuntime) CronEngine() *cron.Engine { return r.engine }
 
 func TestCronRejectsUnsupportedMethods(t *testing.T) {

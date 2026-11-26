@@ -29,6 +29,13 @@ type CronBackend interface {
 	CronEngine() *cron.Engine
 }
 
+// CronResultBackend is optional so older embedders keep the read-only cron
+// endpoint while newer Agents expose account-level task history and delivery
+// acknowledgements.
+type CronResultBackend interface {
+	CronResults() *cron.ResultStore
+}
+
 // CronJobWriter is the host port for HTTP cron mutations. luckyagent-api does
 // not import the Agent module; the embedding app implements this by calling
 // Agent.AddCronJob, PauseCronJob, ResumeCronJob and RemoveCronJob.
