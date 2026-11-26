@@ -30,7 +30,7 @@ func TestUIDeltaRoundTrip(t *testing.T) {
 }
 
 func TestUIActionRoundTrip(t *testing.T) {
-	msg, err := NewMessage(TypeUIAction, "s1", UIActionData{TreeID: "t1", WidgetID: "go"})
+	msg, err := NewMessage(TypeUIAction, "s1", UIActionData{TreeID: "t1", WidgetID: "go", ActionID: "a1", ChartID: "c1", SchemaVersion: 2, DataVersion: 4, Operation: "apply"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,5 +40,8 @@ func TestUIActionRoundTrip(t *testing.T) {
 	}
 	if data.WidgetID != "go" {
 		t.Fatalf("%#v", data)
+	}
+	if data.ActionID != "a1" || data.ChartID != "c1" || data.SchemaVersion != 2 || data.DataVersion != 4 || data.Operation != "apply" {
+		t.Fatalf("versioned data=%#v", data)
 	}
 }

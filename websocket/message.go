@@ -112,9 +112,14 @@ type UINodeData struct {
 
 // UIActionData is a client intent against one widget. It is not tool execution.
 type UIActionData struct {
-	TreeID   string         `json:"tree_id"`
-	WidgetID string         `json:"widget_id"`
-	Values   map[string]any `json:"values,omitempty"`
+	TreeID        string         `json:"tree_id"`
+	WidgetID      string         `json:"widget_id"`
+	Values        map[string]any `json:"values,omitempty"`
+	ActionID      string         `json:"action_id,omitempty"`
+	ChartID       string         `json:"chart_id,omitempty"`
+	SchemaVersion int            `json:"schema_version,omitempty"`
+	DataVersion   int64          `json:"data_version,omitempty"`
+	Operation     string         `json:"operation,omitempty"` // apply | observe
 }
 
 type StreamChunkData struct {
